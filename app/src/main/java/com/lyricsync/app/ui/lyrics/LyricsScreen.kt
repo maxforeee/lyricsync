@@ -1,8 +1,11 @@
 package com.lyricsync.app.ui.lyrics
 
+import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.provider.Settings
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -40,9 +43,13 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -60,6 +67,7 @@ import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -68,11 +76,16 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.lyricsync.app.BuildConfig
 import com.lyricsync.app.R
+import com.lyricsync.app.floating.FloatingLyricService
+import com.lyricsync.app.media.LyricsPrefs
 import com.lyricsync.app.media.PlaybackInfo
 import com.lyricsync.app.model.LyricLine
+import com.lyricsync.app.ui.settings.SettingsScreen
 import com.lyricsync.app.ui.theme.CyanAccent
 import com.lyricsync.app.ui.theme.IndigoBottom
 import com.lyricsync.app.ui.theme.IndigoTop
@@ -95,6 +108,11 @@ fun LyricsScreen(viewModel: LyricsViewModel = viewModel()) {
     val context = LocalContext.current
     val (backgroundTop, backgroundBottom) = rememberAnimatedBackgroundColors()
     val backgroundBrush = Brush.verticalGradient(listOf(backgroundTop, backgroundBottom))
+
+    var settingsOpen by remember { mutableStateOf(false) }
+    var searchOpen by remember { mutableStateOf(false) }
+    var offsetOpen by remember { mutableStateOf(false) }
+    var aboutOpen by remember { mutableStateOf(false) }
 
     var wasRefreshing by remember { mutableStateOf(false) }
     LaunchedEffect(state.refreshing) {
@@ -228,16 +246,15 @@ fun LyricsScreen(viewModel: LyricsViewModel = viewModel()) {
             ) {
                 DotMenuPill(
                     onItemClick = { itemRes ->
-                        if (itemRes == R.string.menu_playback_status) {
-                            viewModel.toggleStatusCard()
-                        } else {
-                            Toast.makeText(
-                                context,
-                                context.getString(R.string.menu_item_toast, context.getString(itemRes)),
-                                Toast.LENGTH_SHORT
-                            ).show()
-                        }
                         viewModel.closeMenu()
+                        when (itemRes) {
+                            R.string.menu_playback_status -> viewModel.toggleStatusCard()
+                            R.string.menu_settings -> settingsOpen = true
+                            R.string.menu_search_lyrics -> searchOpen = true
+                            R.string.menu_offset -> offsetOpen = true
+                            R.string.menu_about -> aboutOpen = true
+                            R.string.menu_floating_bar -> startFloatingBar(context)
+                        }
                     }
                 )
             }
@@ -257,7 +274,228 @@ fun LyricsScreen(viewModel: LyricsViewModel = viewModel()) {
                     .padding(24.dp)
             )
         }
+
+        if (settingsOpen) {
+            SettingsScreen(
+                statusCardVisible = state.statusCardVisible,
+                lyricSource = state.lyricSource,
+                onStatusCardChange = viewModel::setStatusCardVisible,
+                onSourceChange = viewModel::setLyricSource,
+                onAboutClick = { aboutOpen = true },
+                onBack = { settingsOpen = false },
+                modifier = Modifier.fillMaxSize()
+            )
+        }
     }
+
+    BackHandler(enabled = settingsOpen) { settingsOpen = false }
+
+    if (searchOpen) {
+        SearchLyricsDialog(
+            onSearch = { title, artist ->
+                searchOpen = false
+                viewModel.searchLyrics(title, artist)
+            },
+            onDismiss = { searchOpen = false }
+        )
+    }
+    if (offsetOpen) {
+        OffsetDialog(
+            offsetMs = state.offsetMs,
+            onAdjust = viewModel::adjustOffset,
+            onDismiss = { offsetOpen = false }
+        )
+    }
+    if (aboutOpen) {
+        AboutDialog(onDismiss = { aboutOpen = false })
+    }
+}
+
+private fun startFloatingBar(context: Context) {
+    if (Settings.canDrawOverlays(context)) {
+        ContextCompat.startForegroundService(
+            context,
+            Intent(context, FloatingLyricService::class.java)
+        )
+    } else {
+        Toast.makeText(context, R.string.overlay_permission_toast, Toast.LENGTH_LONG).show()
+        context.startActivity(
+            Intent(
+                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                Uri.parse("package:" + context.packageName)
+            )
+        )
+    }
+}
+
+@Composable
+private fun SearchLyricsDialog(
+    onSearch: (String, String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var title by remember { mutableStateOf("") }
+    var artist by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = PillSurface,
+        titleContentColor = Color.White,
+        textContentColor = Color.White,
+        title = { Text(text = stringResource(R.string.search_title)) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = title,
+                    onValueChange = { title = it },
+                    label = { Text(text = stringResource(R.string.search_field_title)) },
+                    singleLine = true,
+                    colors = lyricFieldColors()
+                )
+                OutlinedTextField(
+                    value = artist,
+                    onValueChange = { artist = it },
+                    label = { Text(text = stringResource(R.string.search_field_artist)) },
+                    singleLine = true,
+                    colors = lyricFieldColors()
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onSearch(title, artist) },
+                enabled = title.isNotBlank()
+            ) {
+                Text(
+                    text = stringResource(R.string.search_action),
+                    color = if (title.isNotBlank()) CyanAccent else Color.White.copy(alpha = 0.3f)
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(
+                    text = stringResource(R.string.dialog_close),
+                    color = Color.White.copy(alpha = 0.7f)
+                )
+            }
+        }
+    )
+}
+
+@Composable
+private fun lyricFieldColors() = OutlinedTextFieldDefaults.colors(
+    focusedTextColor = Color.White,
+    unfocusedTextColor = Color.White,
+    cursorColor = CyanAccent,
+    focusedBorderColor = CyanAccent,
+    unfocusedBorderColor = PillBorder,
+    focusedLabelColor = CyanAccent,
+    unfocusedLabelColor = Color.White.copy(alpha = 0.6f)
+)
+
+@Composable
+private fun OffsetDialog(
+    offsetMs: Int,
+    onAdjust: (Int) -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = PillSurface,
+        titleContentColor = Color.White,
+        textContentColor = Color.White,
+        title = { Text(text = stringResource(R.string.offset_title)) },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    TextButton(
+                        onClick = { onAdjust(-LyricsPrefs.OFFSET_STEP_MS) },
+                        enabled = offsetMs > LyricsPrefs.OFFSET_MIN_MS
+                    ) {
+                        Text(
+                            text = stringResource(R.string.offset_minus),
+                            color = CyanAccent,
+                            fontSize = 16.sp
+                        )
+                    }
+                    Text(
+                        text = stringResource(R.string.offset_value, formatOffset(offsetMs)),
+                        color = Color.White,
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    TextButton(
+                        onClick = { onAdjust(LyricsPrefs.OFFSET_STEP_MS) },
+                        enabled = offsetMs < LyricsPrefs.OFFSET_MAX_MS
+                    ) {
+                        Text(
+                            text = stringResource(R.string.offset_plus),
+                            color = CyanAccent,
+                            fontSize = 16.sp
+                        )
+                    }
+                }
+                Text(
+                    text = stringResource(R.string.offset_hint),
+                    color = Color.White.copy(alpha = 0.6f),
+                    fontSize = 12.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(top = 8.dp)
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text(text = stringResource(R.string.dialog_close), color = CyanAccent)
+            }
+        }
+    )
+}
+
+private fun formatOffset(ms: Int): String = if (ms > 0) "+$ms" else ms.toString()
+
+@Composable
+private fun AboutDialog(onDismiss: () -> Unit) {
+    val uriHandler = LocalUriHandler.current
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = PillSurface,
+        titleContentColor = Color.White,
+        textContentColor = Color.White,
+        title = { Text(text = stringResource(R.string.app_name)) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    text = stringResource(R.string.about_version, BuildConfig.VERSION_NAME),
+                    color = Color.White.copy(alpha = 0.8f),
+                    fontSize = 14.sp
+                )
+                Text(
+                    text = stringResource(R.string.about_github),
+                    color = CyanAccent,
+                    fontSize = 14.sp,
+                    modifier = Modifier.clickable {
+                        uriHandler.openUri("https://github.com/maxforeee/lyricsync")
+                    }
+                )
+                Text(
+                    text = stringResource(R.string.about_sources),
+                    color = Color.White.copy(alpha = 0.6f),
+                    fontSize = 13.sp
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text(text = stringResource(R.string.dialog_close), color = CyanAccent)
+            }
+        }
+    )
 }
 
 @Composable

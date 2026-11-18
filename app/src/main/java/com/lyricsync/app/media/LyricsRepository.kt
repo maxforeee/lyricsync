@@ -1,5 +1,7 @@
 package com.lyricsync.app.media
 
+import android.content.Context
+import android.content.SharedPreferences
 import com.lyricsync.app.model.LyricLine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -12,9 +14,54 @@ import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
 
 sealed class LyricsResult {
-    data class Found(val lines: List<LyricLine>) : LyricsResult()
+    data class Found(
+        val lines: List<LyricLine>,
+        val translations: Map<Long, String> = emptyMap()
+    ) : LyricsResult()
     object NotFound : LyricsResult()
     object Error : LyricsResult()
+}
+
+enum class LyricSource { AUTO, LRCLIB, NETEASE }
+
+object LyricsPrefs {
+    const val OFFSET_MIN_MS = -2000
+    const val OFFSET_MAX_MS = 2000
+    const val OFFSET_STEP_MS = 100
+
+    private const val PREFS_NAME = "lyricsync_prefs"
+    private const val KEY_STATUS_CARD = "status_card_visible"
+    private const val KEY_SOURCE = "lyric_source"
+    private const val KEY_OFFSET = "offset_ms"
+
+    private lateinit var prefs: SharedPreferences
+
+    fun init(context: Context) {
+        if (!::prefs.isInitialized) {
+            prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        }
+    }
+
+    var statusCardVisible: Boolean
+        get() = prefs.getBoolean(KEY_STATUS_CARD, true)
+        set(value) {
+            prefs.edit().putBoolean(KEY_STATUS_CARD, value).apply()
+        }
+
+    var lyricSource: LyricSource
+        get() {
+            val name = prefs.getString(KEY_SOURCE, null) ?: return LyricSource.AUTO
+            return runCatching { LyricSource.valueOf(name) }.getOrDefault(LyricSource.AUTO)
+        }
+        set(value) {
+            prefs.edit().putString(KEY_SOURCE, value.name).apply()
+        }
+
+    var offsetMs: Int
+        get() = prefs.getInt(KEY_OFFSET, 0).coerceIn(OFFSET_MIN_MS, OFFSET_MAX_MS)
+        set(value) {
+            prefs.edit().putInt(KEY_OFFSET, value.coerceIn(OFFSET_MIN_MS, OFFSET_MAX_MS)).apply()
+        }
 }
 
 class LyricsRepository {
@@ -24,19 +71,31 @@ class LyricsRepository {
     suspend fun fetchLyrics(title: String, artist: String): LyricsResult {
         val cleanTitle = title.trim()
         val cleanArtist = artist.trim()
-        val key = "$cleanTitle|$cleanArtist"
+        val source = LyricsPrefs.lyricSource
+        val key = "$cleanTitle|$cleanArtist|$source"
         cache[key]?.let { return it }
-        val result = withContext(Dispatchers.IO) { fetchUncached(cleanTitle, cleanArtist) }
+        val result = withContext(Dispatchers.IO) { fetchUncached(cleanTitle, cleanArtist, source) }
         if (result !is LyricsResult.Error) {
             cache[key] = result
         }
         return result
     }
 
-    private fun fetchUncached(title: String, artist: String): LyricsResult {
-        var networkFailed = false
+    private fun fetchUncached(title: String, artist: String, source: LyricSource): LyricsResult {
+        if (source == LyricSource.NETEASE) return fetchNetEase(title, artist)
+        val lrclibResult = fetchLrclib(title, artist)
+        if (lrclibResult is LyricsResult.Found || source == LyricSource.LRCLIB) return lrclibResult
+        val neteaseResult = fetchNetEase(title, artist)
+        if (neteaseResult is LyricsResult.Found) return neteaseResult
+        return if (lrclibResult is LyricsResult.Error || neteaseResult is LyricsResult.Error) {
+            LyricsResult.Error
+        } else {
+            LyricsResult.NotFound
+        }
+    }
 
-        try {
+    private fun fetchLrclib(title: String, artist: String): LyricsResult {
+        return try {
             val artistParam = URLEncoder.encode(artist, "UTF-8")
             val titleParam = URLEncoder.encode(title, "UTF-8")
             val body = httpGet(
@@ -51,43 +110,47 @@ class LyricsRepository {
                     if (lines.isNotEmpty()) return LyricsResult.Found(lines)
                 }
             }
+            LyricsResult.NotFound
         } catch (e: IOException) {
-            networkFailed = true
+            LyricsResult.Error
         } catch (e: JSONException) {
-            // Malformed response: fall through to NetEase.
+            LyricsResult.NotFound
         }
+    }
 
-        try {
+    private fun fetchNetEase(title: String, artist: String): LyricsResult {
+        return try {
             val query = URLEncoder.encode("$title $artist".trim(), "UTF-8")
             val searchBody = httpGet(
                 "https://music.163.com/api/search/get?s=$query&type=1&limit=1",
                 NETEASE_HEADERS
-            )
-            if (searchBody != null) {
-                val songs = JSONObject(searchBody).optJSONObject("result")?.optJSONArray("songs")
-                val songId = songs?.optJSONObject(0)?.optLong("id", -1L) ?: -1L
-                if (songId <= 0L) return LyricsResult.NotFound
-                val lyricBody = httpGet(
-                    "https://music.163.com/api/song/lyric?id=$songId&lv=1",
-                    NETEASE_HEADERS
-                )
-                if (lyricBody != null) {
-                    val lrcJson = JSONObject(lyricBody).optJSONObject("lrc")
-                    val lrc = if (lrcJson == null || lrcJson.isNull("lyric")) null else lrcJson.optString("lyric")
-                    if (!lrc.isNullOrBlank()) {
-                        val lines = LrcParser.parse(lrc)
-                        if (lines.isNotEmpty()) return LyricsResult.Found(lines)
-                    }
-                    return LyricsResult.NotFound
-                }
+            ) ?: return LyricsResult.NotFound
+            val songs = JSONObject(searchBody).optJSONObject("result")?.optJSONArray("songs")
+            val songId = songs?.optJSONObject(0)?.optLong("id", -1L) ?: -1L
+            if (songId <= 0L) return LyricsResult.NotFound
+            val lyricBody = httpGet(
+                "https://music.163.com/api/song/lyric?id=$songId&lv=1&tv=1",
+                NETEASE_HEADERS
+            ) ?: return LyricsResult.NotFound
+            val json = JSONObject(lyricBody)
+            val lrcJson = json.optJSONObject("lrc")
+            val lrc = if (lrcJson == null || lrcJson.isNull("lyric")) null else lrcJson.optString("lyric")
+            if (lrc.isNullOrBlank()) return LyricsResult.NotFound
+            val lines = LrcParser.parse(lrc)
+            if (lines.isEmpty()) return LyricsResult.NotFound
+            val tlyricJson = json.optJSONObject("tlyric")
+            val tlyric = if (tlyricJson == null || tlyricJson.isNull("lyric")) null else tlyricJson.optString("lyric")
+            val translations = if (tlyric.isNullOrBlank()) {
+                emptyMap()
+            } else {
+                LrcParser.parse(tlyric).associate { it.timeMs to it.text }
             }
+            LyricsResult.Found(lines, translations)
         } catch (e: IOException) {
-            networkFailed = true
+            LyricsResult.Error
         } catch (e: JSONException) {
-            // Malformed response: treated as no lyrics below.
+            LyricsResult.NotFound
         }
-
-        return if (networkFailed) LyricsResult.Error else LyricsResult.NotFound
     }
 
     private fun httpGet(url: String, headers: Map<String, String>): String? {
