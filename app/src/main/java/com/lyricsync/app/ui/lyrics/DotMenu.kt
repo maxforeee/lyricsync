@@ -120,6 +120,7 @@ fun RefreshDotButton(
 }
 
 private val menuItems: List<Int> = listOf(
+    R.string.menu_playback_status,
     R.string.menu_settings,
     R.string.menu_search_lyrics,
     R.string.menu_floating_bar,

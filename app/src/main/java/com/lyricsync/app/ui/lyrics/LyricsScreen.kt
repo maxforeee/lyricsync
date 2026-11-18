@@ -1,5 +1,7 @@
 package com.lyricsync.app.ui.lyrics
 
+import android.content.Intent
+import android.provider.Settings
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.LinearEasing
@@ -13,12 +15,15 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
@@ -30,10 +35,12 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -41,20 +48,25 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.lyricsync.app.R
+import com.lyricsync.app.media.PlaybackInfo
 import com.lyricsync.app.model.LyricLine
 import com.lyricsync.app.ui.theme.CyanAccent
 import com.lyricsync.app.ui.theme.IndigoBottom
@@ -67,6 +79,9 @@ import com.lyricsync.app.ui.theme.TealTop
 import com.lyricsync.app.ui.theme.VioletAccent
 import com.lyricsync.app.ui.theme.VioletBottom
 import com.lyricsync.app.ui.theme.VioletTop
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -84,6 +99,17 @@ fun LyricsScreen(viewModel: LyricsViewModel = viewModel()) {
             wasRefreshing = false
             Toast.makeText(context, R.string.refresh_done, Toast.LENGTH_SHORT).show()
         }
+    }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                viewModel.onScreenResume()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     Box(
@@ -122,6 +148,19 @@ fun LyricsScreen(viewModel: LyricsViewModel = viewModel()) {
                         Brush.verticalGradient(listOf(Color.Transparent, ScrimBase))
                     )
             )
+
+            if (state.statusCardVisible) {
+                PlaybackStatusCard(
+                    playback = state.playback,
+                    onGrantAccess = {
+                        context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                    },
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .fillMaxWidth()
+                        .padding(start = 24.dp, end = 24.dp, top = 12.dp)
+                )
+            }
 
             if (!state.followEnabled) {
                 AssistChip(
@@ -168,11 +207,15 @@ fun LyricsScreen(viewModel: LyricsViewModel = viewModel()) {
             ) {
                 DotMenuPill(
                     onItemClick = { itemRes ->
-                        Toast.makeText(
-                            context,
-                            context.getString(R.string.menu_item_toast, context.getString(itemRes)),
-                            Toast.LENGTH_SHORT
-                        ).show()
+                        if (itemRes == R.string.menu_playback_status) {
+                            viewModel.toggleStatusCard()
+                        } else {
+                            Toast.makeText(
+                                context,
+                                context.getString(R.string.menu_item_toast, context.getString(itemRes)),
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
                         viewModel.closeMenu()
                     }
                 )
@@ -271,6 +314,78 @@ private fun LyricRow(text: String, distance: Int) {
             .padding(horizontal = 24.dp, vertical = 8.dp)
     )
 }
+
+@Composable
+private fun PlaybackStatusCard(
+    playback: PlaybackInfo?,
+    onGrantAccess: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val shape = RoundedCornerShape(16.dp)
+    Column(
+        modifier = modifier
+            .clip(shape)
+            .background(PillSurface)
+            .border(width = 1.dp, color = PillBorder, shape = shape)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp)
+    ) {
+        if (playback == null) {
+            StatusText(text = stringResource(R.string.status_no_playback))
+            AssistChip(
+                onClick = onGrantAccess,
+                label = {
+                    Text(text = stringResource(R.string.status_grant_access), fontSize = 12.sp)
+                },
+                colors = AssistChipDefaults.assistChipColors(
+                    containerColor = PillSurface,
+                    labelColor = Color.White
+                ),
+                border = BorderStroke(width = 1.dp, color = PillBorder)
+            )
+        } else {
+            StatusText(text = playback.packageName)
+            StatusText(text = stringResource(R.string.status_track, playback.title, playback.artist))
+            val stateLabel = stringResource(
+                if (playback.playing) R.string.status_playing else R.string.status_paused
+            )
+            StatusText(
+                text = stringResource(
+                    R.string.status_time,
+                    formatClock(playback.positionMs),
+                    formatClock(playback.durationMs)
+                ) + " · " + stateLabel
+            )
+            StatusText(
+                text = stringResource(
+                    if (playback.positionAdvancing) R.string.status_position_moving
+                    else R.string.status_position_stuck
+                )
+            )
+            StatusText(
+                text = stringResource(R.string.status_updated, formatTimeOfDay(playback.lastUpdateMs))
+            )
+        }
+    }
+}
+
+@Composable
+private fun StatusText(text: String) {
+    Text(
+        text = text,
+        color = Color.White.copy(alpha = 0.7f),
+        fontSize = 12.sp,
+        lineHeight = 16.sp
+    )
+}
+
+private fun formatClock(ms: Long): String {
+    val totalSeconds = (ms / 1000L).coerceAtLeast(0L)
+    return String.format(Locale.US, "%02d:%02d", totalSeconds / 60L, totalSeconds % 60L)
+}
+
+private fun formatTimeOfDay(epochMs: Long): String =
+    SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(epochMs))
 
 @Composable
 private fun rememberAnimatedBackground(): Brush {

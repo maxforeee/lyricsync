@@ -10,5 +10,15 @@
     <string name="menu_floating_bar">Floating bar</string>
     <string name="menu_offset">Offset</string>
     <string name="menu_about">About</string>
+    <string name="menu_playback_status">Playback status</string>
     <string name="menu_item_toast">%1$s — placeholder, not implemented yet</string>
+    <string name="status_no_playback">No playback detected - grant notification access</string>
+    <string name="status_grant_access">Grant access</string>
+    <string name="status_track">%1$s - %2$s</string>
+    <string name="status_time">%1$s / %2$s</string>
+    <string name="status_playing">Playing</string>
+    <string name="status_paused">Paused</string>
+    <string name="status_position_moving">Position: moving</string>
+    <string name="status_position_stuck">Position: STUCK</string>
+    <string name="status_updated">Updated %1$s</string>
 </resources>
