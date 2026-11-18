@@ -35,7 +35,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
@@ -72,6 +74,16 @@ fun LyricsScreen(viewModel: LyricsViewModel = viewModel()) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val backgroundBrush = rememberAnimatedBackground()
+
+    var wasRefreshing by remember { mutableStateOf(false) }
+    LaunchedEffect(state.refreshing) {
+        if (state.refreshing) {
+            wasRefreshing = true
+        } else if (wasRefreshing) {
+            wasRefreshing = false
+            Toast.makeText(context, R.string.refresh_done, Toast.LENGTH_SHORT).show()
+        }
+    }
 
     Box(
         modifier = Modifier
@@ -169,6 +181,14 @@ fun LyricsScreen(viewModel: LyricsViewModel = viewModel()) {
                 onClick = viewModel::toggleMenu,
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
+                    .padding(24.dp)
+            )
+
+            RefreshDotButton(
+                refreshing = state.refreshing,
+                onClick = viewModel::refresh,
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
                     .padding(24.dp)
             )
         }

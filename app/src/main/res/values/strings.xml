@@ -2,6 +2,8 @@
 <resources>
     <string name="app_name">LyricSync</string>
     <string name="dot_content_description">More options</string>
+    <string name="refresh_content_description">Refresh</string>
+    <string name="refresh_done">Refreshed</string>
     <string name="resume_follow">Resume follow</string>
     <string name="menu_settings">Settings</string>
     <string name="menu_search_lyrics">Search lyrics</string>

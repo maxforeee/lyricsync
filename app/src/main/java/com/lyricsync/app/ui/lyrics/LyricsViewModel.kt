@@ -16,7 +16,8 @@ data class LyricsUiState(
     val lines: List<LyricLine> = SampleLyrics.lines,
     val currentIndex: Int = 0,
     val followEnabled: Boolean = true,
-    val menuOpen: Boolean = false
+    val menuOpen: Boolean = false,
+    val refreshing: Boolean = false
 )
 
 class LyricsViewModel : ViewModel() {
@@ -56,5 +57,24 @@ class LyricsViewModel : ViewModel() {
 
     fun closeMenu() {
         _state.update { it.copy(menuOpen = false) }
+    }
+
+    fun refresh() {
+        if (_state.value.refreshing) return
+        viewModelScope.launch {
+            _state.update { it.copy(refreshing = true) }
+            delay(600L)
+            // TODO(M0/media chunk): re-read the real MediaSession playback state
+            // (title, artist, position, play/pause) and re-fetch lyrics here.
+            // Until then, re-read the sample track and re-apply the current index.
+            _state.update { current ->
+                val lines = SampleLyrics.lines
+                current.copy(
+                    lines = lines,
+                    currentIndex = current.currentIndex.coerceIn(0, lines.size - 1),
+                    refreshing = false
+                )
+            }
+        }
     }
 }
