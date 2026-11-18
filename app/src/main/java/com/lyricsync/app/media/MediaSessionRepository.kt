@@ -82,7 +82,7 @@ class MediaSessionRepository(
     private fun isListenerGranted(): Boolean {
         val enabled = Settings.Secure.getString(
             context.contentResolver,
-            Settings.Secure.ENABLED_NOTIFICATION_LISTENERS
+            "enabled_notification_listeners" // Settings.Secure.ENABLED_NOTIFICATION_LISTENERS is @hide, use the literal
         ) ?: return false
         val component = ComponentName(context, LyricNotificationListener::class.java)
         return enabled.split(':').any { it == component.flattenToString() }
