@@ -7,6 +7,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
@@ -26,10 +27,13 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -51,6 +55,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -73,7 +78,6 @@ import com.lyricsync.app.ui.theme.IndigoBottom
 import com.lyricsync.app.ui.theme.IndigoTop
 import com.lyricsync.app.ui.theme.PillBorder
 import com.lyricsync.app.ui.theme.PillSurface
-import com.lyricsync.app.ui.theme.ScrimBase
 import com.lyricsync.app.ui.theme.TealBottom
 import com.lyricsync.app.ui.theme.TealTop
 import com.lyricsync.app.ui.theme.VioletAccent
@@ -89,7 +93,8 @@ import kotlin.math.roundToInt
 fun LyricsScreen(viewModel: LyricsViewModel = viewModel()) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
-    val backgroundBrush = rememberAnimatedBackground()
+    val (backgroundTop, backgroundBottom) = rememberAnimatedBackgroundColors()
+    val backgroundBrush = Brush.verticalGradient(listOf(backgroundTop, backgroundBottom))
 
     var wasRefreshing by remember { mutableStateOf(false) }
     LaunchedEffect(state.refreshing) {
@@ -117,47 +122,54 @@ fun LyricsScreen(viewModel: LyricsViewModel = viewModel()) {
             .fillMaxSize()
             .background(backgroundBrush)
     ) {
+        when {
+            state.lyricsLoading -> LyricsCenterMessage(
+                text = stringResource(R.string.loading_lyrics)
+            )
+            state.lyricsUnavailable -> UnavailableLyrics(
+                title = state.playback?.title.orEmpty(),
+                artist = state.playback?.artist.orEmpty()
+            )
+            else -> LyricsList(
+                lines = state.lines,
+                currentIndex = state.currentIndex,
+                followEnabled = state.followEnabled,
+                onUserScroll = viewModel::onUserScroll,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+
+        val statusBarTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+        val navigationBarBottom =
+            WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .fillMaxWidth()
+                .height(160.dp + statusBarTop)
+                .background(
+                    Brush.verticalGradient(
+                        listOf(backgroundTop, backgroundTop.copy(alpha = 0f))
+                    )
+                )
+        )
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .height(160.dp + navigationBarBottom)
+                .background(
+                    Brush.verticalGradient(
+                        listOf(backgroundBottom.copy(alpha = 0f), backgroundBottom)
+                    )
+                )
+        )
+
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .windowInsetsPadding(WindowInsets.systemBars)
         ) {
-            when {
-                state.lyricsLoading -> LyricsCenterMessage(
-                    text = stringResource(R.string.loading_lyrics)
-                )
-                state.lyricsUnavailable -> UnavailableLyrics(
-                    title = state.playback?.title.orEmpty(),
-                    artist = state.playback?.artist.orEmpty()
-                )
-                else -> LyricsList(
-                    lines = state.lines,
-                    currentIndex = state.currentIndex,
-                    followEnabled = state.followEnabled,
-                    onUserScroll = viewModel::onUserScroll,
-                    modifier = Modifier.fillMaxSize()
-                )
-            }
-
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .fillMaxWidth()
-                    .height(120.dp)
-                    .background(
-                        Brush.verticalGradient(listOf(ScrimBase, Color.Transparent))
-                    )
-            )
-            Box(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .height(120.dp)
-                    .background(
-                        Brush.verticalGradient(listOf(Color.Transparent, ScrimBase))
-                    )
-            )
-
             if (state.statusCardVisible) {
                 PlaybackStatusCard(
                     playback = state.playback,
@@ -268,25 +280,42 @@ private fun LyricsList(
     }
 
     BoxWithConstraints(modifier = modifier) {
-        val halfViewport = maxHeight / 2
-        val centerOffsetPx = with(density) {
+        val viewportHeight = maxHeight
+        val anchorOffsetPx = with(density) {
             ((36.sp.toPx() + 16.dp.toPx()) / 2f).roundToInt()
         }
+        var lastAutoScrollTarget by remember { mutableStateOf(-1) }
 
         LaunchedEffect(currentIndex, followEnabled) {
-            if (followEnabled) {
-                listState.animateScrollToItem(currentIndex, centerOffsetPx)
+            if (!followEnabled) {
+                lastAutoScrollTarget = -1
+                return@LaunchedEffect
+            }
+            val visibleItems = listState.layoutInfo.visibleItemsInfo
+            val currentVisible = visibleItems.any { it.index == currentIndex }
+            val nearBottomEdge = visibleItems.lastOrNull()
+                ?.let { currentIndex >= it.index - 2 } ?: false
+            if ((!currentVisible || nearBottomEdge) && lastAutoScrollTarget != currentIndex) {
+                lastAutoScrollTarget = currentIndex
+                listState.animateScrollToItem(currentIndex, anchorOffsetPx)
             }
         }
 
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(vertical = halfViewport),
+            contentPadding = PaddingValues(
+                top = viewportHeight * 0.35f,
+                bottom = viewportHeight * 0.65f
+            ),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             itemsIndexed(lines, key = { _, line -> line.timeMs }) { index, line ->
-                LyricRow(text = line.text, distance = abs(index - currentIndex))
+                LyricRow(
+                    text = line.text,
+                    distance = abs(index - currentIndex),
+                    isAboveCurrent = index < currentIndex
+                )
             }
         }
     }
@@ -343,7 +372,7 @@ private fun UnavailableLyrics(title: String, artist: String) {
 }
 
 @Composable
-private fun LyricRow(text: String, distance: Int) {
+private fun LyricRow(text: String, distance: Int, isAboveCurrent: Boolean) {
     val style = when (distance) {
         0 -> TextStyle(
             brush = Brush.linearGradient(listOf(CyanAccent, VioletAccent)),
@@ -353,23 +382,46 @@ private fun LyricRow(text: String, distance: Int) {
             textAlign = TextAlign.Center
         )
         1 -> TextStyle(
-            color = Color.White.copy(alpha = 0.6f),
+            color = Color.White,
             fontSize = 18.sp,
             lineHeight = 24.sp,
             textAlign = TextAlign.Center
         )
         else -> TextStyle(
-            color = Color.White.copy(alpha = 0.35f),
+            color = Color.White,
             fontSize = 16.sp,
             lineHeight = 22.sp,
             textAlign = TextAlign.Center
         )
     }
+    val arcFraction = (distance / 6f).coerceIn(0f, 1f)
+    val arcScale by animateFloatAsState(
+        targetValue = 1f - 0.15f * arcFraction,
+        animationSpec = tween(250),
+        label = "arcScale"
+    )
+    val arcAlpha by animateFloatAsState(
+        targetValue = 1f - 0.75f * arcFraction,
+        animationSpec = tween(250),
+        label = "arcAlpha"
+    )
+    val arcTilt by animateFloatAsState(
+        targetValue = if (isAboveCurrent) 12f * arcFraction else -12f * arcFraction,
+        animationSpec = tween(250),
+        label = "arcTilt"
+    )
     Text(
         text = text,
         style = style,
         modifier = Modifier
             .fillMaxWidth()
+            .graphicsLayer {
+                scaleX = arcScale
+                scaleY = arcScale
+                alpha = arcAlpha
+                rotationX = arcTilt
+                cameraDistance = 12f * density
+            }
             .padding(horizontal = 24.dp, vertical = 8.dp)
     )
 }
@@ -447,7 +499,7 @@ private fun formatTimeOfDay(epochMs: Long): String =
     SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(epochMs))
 
 @Composable
-private fun rememberAnimatedBackground(): Brush {
+private fun rememberAnimatedBackgroundColors(): Pair<Color, Color> {
     val transition = rememberInfiniteTransition(label = "lyricsBackground")
     val phase by transition.animateFloat(
         initialValue = 0f,
@@ -468,5 +520,5 @@ private fun rememberAnimatedBackground(): Brush {
     val t = phase - phase.toInt()
     val top = lerp(palettes[segment][0], palettes[next][0], t)
     val bottom = lerp(palettes[segment][1], palettes[next][1], t)
-    return Brush.verticalGradient(listOf(top, bottom))
+    return top to bottom
 }
