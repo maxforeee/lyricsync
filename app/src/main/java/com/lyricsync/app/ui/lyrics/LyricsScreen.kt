@@ -122,13 +122,22 @@ fun LyricsScreen(viewModel: LyricsViewModel = viewModel()) {
                 .fillMaxSize()
                 .windowInsetsPadding(WindowInsets.systemBars)
         ) {
-            LyricsList(
-                lines = state.lines,
-                currentIndex = state.currentIndex,
-                followEnabled = state.followEnabled,
-                onUserScroll = viewModel::onUserScroll,
-                modifier = Modifier.fillMaxSize()
-            )
+            when {
+                state.lyricsLoading -> LyricsCenterMessage(
+                    text = stringResource(R.string.loading_lyrics)
+                )
+                state.lyricsUnavailable -> UnavailableLyrics(
+                    title = state.playback?.title.orEmpty(),
+                    artist = state.playback?.artist.orEmpty()
+                )
+                else -> LyricsList(
+                    lines = state.lines,
+                    currentIndex = state.currentIndex,
+                    followEnabled = state.followEnabled,
+                    onUserScroll = viewModel::onUserScroll,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
 
             Box(
                 modifier = Modifier
@@ -280,6 +289,56 @@ private fun LyricsList(
                 LyricRow(text = line.text, distance = abs(index - currentIndex))
             }
         }
+    }
+}
+
+@Composable
+private fun LyricsCenterMessage(text: String) {
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = text,
+            color = Color.White.copy(alpha = 0.7f),
+            fontSize = 14.sp
+        )
+    }
+}
+
+@Composable
+private fun UnavailableLyrics(title: String, artist: String) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 24.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        if (title.isNotBlank()) {
+            Text(
+                text = title,
+                color = Color.White,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center
+            )
+        }
+        if (artist.isNotBlank()) {
+            Text(
+                text = artist,
+                color = Color.White.copy(alpha = 0.6f),
+                fontSize = 14.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(top = 4.dp)
+            )
+        }
+        Text(
+            text = stringResource(R.string.no_lyrics_found),
+            color = Color.White.copy(alpha = 0.7f),
+            fontSize = 14.sp,
+            modifier = Modifier.padding(top = 12.dp)
+        )
     }
 }
 
