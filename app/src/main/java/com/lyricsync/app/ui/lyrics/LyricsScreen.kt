@@ -535,13 +535,11 @@ private fun LyricsList(
             }
             if (lastAutoScrollTarget != currentIndex) {
                 lastAutoScrollTarget = currentIndex
+                // animateScrollToItem has no animationSpec parameter in this
+                // Compose version; its built-in animation is already spring-based.
                 listState.animateScrollToItem(
                     index = currentIndex,
-                    scrollOffset = anchorOffsetPx,
-                    animationSpec = spring(
-                        stiffness = Spring.StiffnessLow,
-                        dampingRatio = Spring.DampingRatioMediumBouncy
-                    )
+                    scrollOffset = anchorOffsetPx
                 )
             }
         }
