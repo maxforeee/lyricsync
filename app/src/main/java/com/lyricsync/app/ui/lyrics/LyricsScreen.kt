@@ -562,13 +562,13 @@ private fun LyricsList(
 }
 
 /**
- * Lift the list so [index] rests centred on the 50% anchor using a monotonic
- * tween. animateScrollToItem is deliberately not used: it aims at a target
- * computed from the pre-change layout and then snap-corrects at the end,
- * which reads as a downward dip because the highlighted row's height changes
- * with the index. Re-reading the remaining distance every frame absorbs that
- * layout change, and the eased fraction never exceeds the remaining distance,
- * so the motion never overshoots or settles back down.
+ * Apple Music style lift: when the next line becomes current, the whole list
+ * glides up by one line so the new line settles on the 50% anchor, the old
+ * line shrinking and dimming away above it. The motion is driven only by
+ * relative scrollBy deltas measured from live layout info, re-read every
+ * frame, so it can never jump. scrollToItem/animateScrollToItem are banned
+ * here: their absolute scroll offsets ignore content padding, and the old
+ * settle snap yanked the row to the top of the screen on every line change.
  */
 private suspend fun liftToAnchor(
     listState: LazyListState,
@@ -577,17 +577,23 @@ private suspend fun liftToAnchor(
     anchorOffsetPx: Int
 ) {
     val desiredTop = anchorTopPx - anchorOffsetPx
-    val initial = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }
-    if (initial == null) {
-        // Far jump (new song, resume follow after manual scroll): snap, don't fly.
-        listState.scrollToItem(index, anchorOffsetPx)
-        return
+    // Far jump (new song, resume follow after manual scroll): walk the list
+    // toward the target in relative steps until the row is visible, then
+    // glide the rest of the way like a normal line change.
+    var guard = 0
+    while (listState.layoutInfo.visibleItemsInfo.none { it.index == index } && guard < 12) {
+        guard++
+        val firstVisible = listState.layoutInfo.visibleItemsInfo.firstOrNull()?.index ?: 0
+        val viewport = (listState.layoutInfo.viewportEndOffset - listState.layoutInfo.viewportStartOffset).toFloat()
+        val step = viewport * 0.8f
+        listState.scroll { scrollBy(if (index > firstVisible) step else -step) }
     }
+    val initial = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index } ?: return
     if (initial.offset == desiredTop) return
     listState.scroll {
         val progress = AnimationState(0f)
         var previous = 0f
-        progress.animateTo(1f, tween(durationMillis = 300, easing = FastOutSlowInEasing)) {
+        progress.animateTo(1f, tween(durationMillis = 350, easing = FastOutSlowInEasing)) {
             val item = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }
             if (item == null) {
                 cancelAnimation()
@@ -599,9 +605,13 @@ private suspend fun liftToAnchor(
             scrollBy(remaining * fraction)
         }
     }
+    // Settle with a tiny relative nudge only; never an absolute jump.
     val settled = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }
-    if (settled == null || settled.offset != desiredTop) {
-        listState.scrollToItem(index, anchorOffsetPx)
+    if (settled != null) {
+        val residual = (settled.offset - desiredTop).toFloat()
+        if (abs(residual) > 1f) {
+            listState.scroll { scrollBy(residual) }
+        }
     }
 }
 
