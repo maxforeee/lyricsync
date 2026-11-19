@@ -4,7 +4,11 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
 import com.lyricsync.app.model.LyricLine
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import org.json.JSONException
 import org.json.JSONObject
@@ -116,19 +120,19 @@ class LyricsRepository {
         return result
     }
 
-    private fun fetchUncached(title: String, artist: String, source: LyricSource): LyricsResult {
+    private suspend fun fetchUncached(title: String, artist: String, source: LyricSource): LyricsResult {
+        if (source == LyricSource.AUTO) return fetchAutoCrossChecked(title, artist)
         val chain: List<Pair<String, () -> LyricsResult>> = when (source) {
             LyricSource.LRCLIB -> listOf("lrclib" to { fetchLrclib(title, artist) })
             LyricSource.NETEASE -> listOf("NetEase" to { fetchNetEase(title, artist) })
             LyricSource.QQ -> listOf("QQ" to { QqMusicSource.fetch(title, artist) })
             LyricSource.KUGOU -> listOf("Kugou" to { KugouSource.fetch(title, artist) })
-            LyricSource.AUTO -> listOf(
-                "lrclib" to { fetchLrclib(title, artist) },
-                "NetEase" to { fetchNetEase(title, artist) },
-                "QQ" to { QqMusicSource.fetch(title, artist) },
-                "Kugou" to { KugouSource.fetch(title, artist) }
-            )
+            LyricSource.AUTO -> emptyList()
         }
+        return runChain(chain)
+    }
+
+    private fun runChain(chain: List<Pair<String, () -> LyricsResult>>): LyricsResult {
         var anyError = false
         for ((name, fetch) in chain) {
             val result = try {
@@ -143,6 +147,125 @@ class LyricsRepository {
         }
         return if (anyError) LyricsResult.Error else LyricsResult.NotFound
     }
+
+    // AUTO: fetch the three most reliable sources in parallel (lrclib preferred)
+    // and merge them by median timestamp so one source with wrong timestamps
+    // cannot drag the highlighted line off the singing.
+    private suspend fun fetchAutoCrossChecked(title: String, artist: String): LyricsResult = coroutineScope {
+        val primaries = listOf(
+            "lrclib" to { fetchLrclib(title, artist) },
+            "NetEase" to { fetchNetEase(title, artist) },
+            "QQ" to { QqMusicSource.fetch(title, artist) }
+        )
+        val outcomes = primaries.map { (name, fetch) ->
+            async {
+                val result = try {
+                    fetch()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "Source $name threw, skipping", e)
+                    LyricsResult.Error
+                }
+                name to result
+            }
+        }.awaitAll()
+        val found = outcomes.mapNotNull { (_, result) -> result as? LyricsResult.Found }
+        if (found.isEmpty()) {
+            // All three primaries failed: keep the legacy AUTO behaviour by
+            // trying the remaining chain source, preserving Error-vs-NotFound.
+            val kugou = try {
+                KugouSource.fetch(title, artist)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "Source Kugou threw, skipping", e)
+                LyricsResult.Error
+            }
+            if (kugou is LyricsResult.Found) return@coroutineScope kugou
+            val anyError = kugou is LyricsResult.Error ||
+                outcomes.any { (_, result) -> result is LyricsResult.Error }
+            return@coroutineScope if (anyError) LyricsResult.Error else LyricsResult.NotFound
+        }
+        if (found.size == 1) return@coroutineScope found.first()
+        try {
+            mergeByMedianTimestamp(found)
+        } catch (e: Exception) {
+            Log.w(TAG, "Lyric merge failed, using first available source", e)
+            found.first()
+        }
+    }
+
+    /**
+     * Align the sources' lines by normalised text (in order, so repeated chorus
+     * lines match their own occurrence), then take the median timestamp per
+     * matched line. Lines only the base source has keep their own timestamp;
+     * extra lines in other sources are ignored, never dropped from the base.
+     * The first source (lrclib when present) supplies the line text and order.
+     */
+    private fun mergeByMedianTimestamp(found: List<LyricsResult.Found>): LyricsResult.Found {
+        val base = found.first()
+        val baseKeys = base.lines.map { normalizeLyricText(it.text) }
+        val timestamps = base.lines.map { mutableListOf(it.timeMs) }
+        // Per other source: base-line index for each of its lines, -1 if unmatched.
+        val alignments = mutableListOf<Pair<LyricsResult.Found, IntArray>>()
+        for (other in found.drop(1)) {
+            val otherKeys = other.lines.map { normalizeLyricText(it.text) }
+            val alignment = IntArray(other.lines.size) { -1 }
+            var cursor = 0
+            for (i in base.lines.indices) {
+                val key = baseKeys[i]
+                if (key.isEmpty()) continue
+                var j = cursor
+                while (j < otherKeys.size && otherKeys[j] != key) j++
+                if (j < otherKeys.size) {
+                    timestamps[i] += other.lines[j].timeMs
+                    alignment[j] = i
+                    cursor = j + 1
+                }
+            }
+            alignments += other to alignment
+        }
+        var previous = Long.MIN_VALUE
+        val mergedLines = base.lines.mapIndexed { i, line ->
+            val sorted = timestamps[i].sorted()
+            val median = if (sorted.size % 2 == 1) {
+                sorted[sorted.size / 2]
+            } else {
+                (sorted[sorted.size / 2 - 1] + sorted[sorted.size / 2]) / 2
+            }
+            // Consumers scan lines in order and stop at the first future line,
+            // so merged timestamps must stay non-decreasing even when an
+            // unmatched base line kept a wrong timestamp.
+            val time = maxOf(median, previous)
+            previous = time
+            LyricLine(time, line.text)
+        }
+        val translations = HashMap<Long, String>()
+        val owner = found.firstOrNull { it.translations.isNotEmpty() }
+        if (owner != null) {
+            if (owner === base) {
+                base.lines.forEachIndexed { i, line ->
+                    owner.translations[line.timeMs]?.let { translations[mergedLines[i].timeMs] = it }
+                }
+            } else {
+                val alignment = alignments.first { it.first === owner }.second
+                owner.lines.forEachIndexed { j, line ->
+                    val i = alignment[j]
+                    if (i >= 0) {
+                        owner.translations[line.timeMs]?.let { translations[mergedLines[i].timeMs] = it }
+                    }
+                }
+            }
+        }
+        return LyricsResult.Found(mergedLines, translations)
+    }
+
+    private fun normalizeLyricText(text: String): String =
+        text.lowercase()
+            .filter { it.isLetterOrDigit() || it.isWhitespace() }
+            .replace(NORMALIZE_WHITESPACE, " ")
+            .trim()
 
     private fun fetchLrclib(title: String, artist: String): LyricsResult {
         return try {
@@ -226,6 +349,7 @@ class LyricsRepository {
         private const val TAG = "LyricsRepository"
         private const val TIMEOUT_MS = 8_000
         private const val MAX_CACHE_ENTRIES = 32
+        private val NORMALIZE_WHITESPACE = Regex("\\s+")
         private val NETEASE_HEADERS = mapOf(
             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Referer" to "https://music.163.com"
