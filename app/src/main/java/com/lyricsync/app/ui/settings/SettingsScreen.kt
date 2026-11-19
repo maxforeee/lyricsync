@@ -117,6 +117,8 @@ fun SettingsScreen(
                 SourceRow(R.string.settings_source_auto, LyricSource.AUTO, lyricSource, onSourceChange)
                 SourceRow(R.string.settings_source_lrclib, LyricSource.LRCLIB, lyricSource, onSourceChange)
                 SourceRow(R.string.settings_source_netease, LyricSource.NETEASE, lyricSource, onSourceChange)
+                SourceRow(R.string.settings_source_qq, LyricSource.QQ, lyricSource, onSourceChange)
+                SourceRow(R.string.settings_source_kugou, LyricSource.KUGOU, lyricSource, onSourceChange)
             }
         }
 

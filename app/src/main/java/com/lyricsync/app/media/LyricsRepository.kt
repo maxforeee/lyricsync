@@ -2,6 +2,7 @@ package com.lyricsync.app.media
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.util.Log
 import com.lyricsync.app.model.LyricLine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -22,7 +23,7 @@ sealed class LyricsResult {
     object Error : LyricsResult()
 }
 
-enum class LyricSource { AUTO, LRCLIB, NETEASE }
+enum class LyricSource { AUTO, LRCLIB, NETEASE, QQ, KUGOU }
 
 object LyricsPrefs {
     const val OFFSET_MIN_MS = -2000
@@ -82,16 +83,31 @@ class LyricsRepository {
     }
 
     private fun fetchUncached(title: String, artist: String, source: LyricSource): LyricsResult {
-        if (source == LyricSource.NETEASE) return fetchNetEase(title, artist)
-        val lrclibResult = fetchLrclib(title, artist)
-        if (lrclibResult is LyricsResult.Found || source == LyricSource.LRCLIB) return lrclibResult
-        val neteaseResult = fetchNetEase(title, artist)
-        if (neteaseResult is LyricsResult.Found) return neteaseResult
-        return if (lrclibResult is LyricsResult.Error || neteaseResult is LyricsResult.Error) {
-            LyricsResult.Error
-        } else {
-            LyricsResult.NotFound
+        val chain: List<Pair<String, () -> LyricsResult>> = when (source) {
+            LyricSource.LRCLIB -> listOf("lrclib" to { fetchLrclib(title, artist) })
+            LyricSource.NETEASE -> listOf("NetEase" to { fetchNetEase(title, artist) })
+            LyricSource.QQ -> listOf("QQ" to { QqMusicSource.fetch(title, artist) })
+            LyricSource.KUGOU -> listOf("Kugou" to { KugouSource.fetch(title, artist) })
+            LyricSource.AUTO -> listOf(
+                "lrclib" to { fetchLrclib(title, artist) },
+                "NetEase" to { fetchNetEase(title, artist) },
+                "QQ" to { QqMusicSource.fetch(title, artist) },
+                "Kugou" to { KugouSource.fetch(title, artist) }
+            )
         }
+        var anyError = false
+        for ((name, fetch) in chain) {
+            val result = try {
+                fetch()
+            } catch (e: Exception) {
+                Log.w(TAG, "Source $name threw, skipping", e)
+                LyricsResult.Error
+            }
+            if (result is LyricsResult.Found) return result
+            if (result is LyricsResult.Error) anyError = true
+            Log.d(TAG, "Source $name returned $result, continuing")
+        }
+        return if (anyError) LyricsResult.Error else LyricsResult.NotFound
     }
 
     private fun fetchLrclib(title: String, artist: String): LyricsResult {
@@ -170,6 +186,7 @@ class LyricsRepository {
     }
 
     companion object {
+        private const val TAG = "LyricsRepository"
         private const val TIMEOUT_MS = 8_000
         private val NETEASE_HEADERS = mapOf(
             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
