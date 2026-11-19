@@ -102,6 +102,7 @@ import com.lyricsync.app.ui.theme.TealTop
 import com.lyricsync.app.ui.theme.VioletAccent
 import com.lyricsync.app.ui.theme.VioletBottom
 import com.lyricsync.app.ui.theme.VioletTop
+import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -535,8 +536,20 @@ private fun LyricsList(
             // Only a genuine index change lifts the list; re-emissions of the
             // same index (playback polling) never restart the animation.
             if (lastAutoScrollTarget == currentIndex) return@LaunchedEffect
-            lastAutoScrollTarget = currentIndex
-            liftToAnchor(listState, currentIndex, anchorTopPx, anchorOffsetPx)
+            // Record the target only once the row actually rests on the anchor.
+            // Playback position can jitter across a line boundary (6 -> 7 -> 6),
+            // cancelling the in-flight lift; recording the target up front let
+            // those cancelled lifts poison both indices, so the list then never
+            // scrolled again for them. Retry instead of skipping.
+            var attempts = 0
+            while (lastAutoScrollTarget != currentIndex && attempts < 4) {
+                attempts++
+                if (liftToAnchor(listState, currentIndex, anchorTopPx, anchorOffsetPx)) {
+                    lastAutoScrollTarget = currentIndex
+                } else {
+                    delay(120L)
+                }
+            }
         }
 
         LazyColumn(
@@ -569,13 +582,16 @@ private fun LyricsList(
  * frame, so it can never jump. scrollToItem/animateScrollToItem are banned
  * here: their absolute scroll offsets ignore content padding, and the old
  * settle snap yanked the row to the top of the screen on every line change.
+ *
+ * Returns true only when the row ends up resting on the anchor, so the caller
+ * can retry a lift that bailed or was cancelled instead of treating it as done.
  */
 private suspend fun liftToAnchor(
     listState: LazyListState,
     index: Int,
     anchorTopPx: Int,
     anchorOffsetPx: Int
-) {
+): Boolean {
     val desiredTop = anchorTopPx - anchorOffsetPx
     // Far jump (new song, resume follow after manual scroll): walk the list
     // toward the target in relative steps until the row is visible, then
@@ -588,8 +604,8 @@ private suspend fun liftToAnchor(
         val step = viewport * 0.8f
         listState.scroll { scrollBy(if (index > firstVisible) step else -step) }
     }
-    val initial = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index } ?: return
-    if (initial.offset == desiredTop) return
+    val initial = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index } ?: return false
+    if (initial.offset == desiredTop) return true
     listState.scroll {
         val progress = AnimationState(0f)
         var previous = 0f
@@ -613,6 +629,8 @@ private suspend fun liftToAnchor(
             listState.scroll { scrollBy(residual) }
         }
     }
+    val resting = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }
+    return resting != null && abs(resting.offset - desiredTop) <= 1
 }
 
 @Composable
