@@ -20,6 +20,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.RadioButtonDefaults
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
@@ -35,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lyricsync.app.R
 import com.lyricsync.app.media.LyricSource
+import com.lyricsync.app.media.LyricsPrefs
 import com.lyricsync.app.ui.theme.CyanAccent
 import com.lyricsync.app.ui.theme.IndigoBottom
 import com.lyricsync.app.ui.theme.IndigoTop
@@ -47,6 +50,8 @@ fun SettingsScreen(
     lyricSource: LyricSource,
     onStatusCardChange: (Boolean) -> Unit,
     onSourceChange: (LyricSource) -> Unit,
+    floatingBarWidthDp: Int,
+    onFloatingBarWidthChange: (Int) -> Unit,
     onAboutClick: () -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier
@@ -119,6 +124,35 @@ fun SettingsScreen(
                 SourceRow(R.string.settings_source_netease, LyricSource.NETEASE, lyricSource, onSourceChange)
                 SourceRow(R.string.settings_source_qq, LyricSource.QQ, lyricSource, onSourceChange)
                 SourceRow(R.string.settings_source_kugou, LyricSource.KUGOU, lyricSource, onSourceChange)
+            }
+        }
+
+        Text(
+            text = stringResource(R.string.settings_floating_bar_title),
+            color = Color.White.copy(alpha = 0.7f),
+            fontSize = 13.sp,
+            modifier = Modifier.padding(top = 20.dp, bottom = 8.dp, start = 4.dp)
+        )
+        SettingsCard {
+            Column {
+                Text(
+                    text = stringResource(R.string.settings_floating_bar_value, floatingBarWidthDp),
+                    color = Color.White.copy(alpha = 0.7f),
+                    fontSize = 14.sp,
+                    modifier = Modifier.align(Alignment.End)
+                )
+                Slider(
+                    value = floatingBarWidthDp.toFloat(),
+                    onValueChange = { onFloatingBarWidthChange(it.toInt()) },
+                    valueRange = LyricsPrefs.FLOATING_BAR_MIN_DP.toFloat()..LyricsPrefs.FLOATING_BAR_MAX_DP.toFloat(),
+                    steps = 9,
+                    colors = SliderDefaults.colors(
+                        thumbColor = Color.White,
+                        activeTrackColor = CyanAccent,
+                        inactiveTrackColor = PillSurface
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
             }
         }
 

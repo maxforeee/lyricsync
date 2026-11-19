@@ -1,5 +1,6 @@
 package com.lyricsync.app.floating
 
+import android.animation.ObjectAnimator
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -10,7 +11,6 @@ import android.content.pm.ServiceInfo
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.os.IBinder
-import android.text.TextUtils
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -67,6 +67,8 @@ class FloatingLyricService : Service() {
     private var shownIndex = -1
     private var fetchJob: Job? = null
     private var lastPlayback: PlaybackInfo? = null
+    private var lyricShift: Runnable? = null
+    private var translationShift: Runnable? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -92,6 +94,8 @@ class FloatingLyricService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_NOT_STICKY
 
     override fun onDestroy() {
+        if (::lyricText.isInitialized) lyricShift?.let { lyricText.removeCallbacks(it) }
+        if (::translationText.isInitialized) translationShift?.let { translationText.removeCallbacks(it) }
         serviceScope.cancel()
         barView?.let { windowManager.removeView(it) }
         barView = null
@@ -106,6 +110,8 @@ class FloatingLyricService : Service() {
             translations = emptyMap()
             lyricsKey = null
             shownIndex = -1
+            clearShift(lyricText, lyricShift)
+            lyricShift = null
             lyricText.text = getString(R.string.floating_no_playback)
             translationText.visibility = View.GONE
             return
@@ -117,6 +123,8 @@ class FloatingLyricService : Service() {
             lines = emptyList()
             translations = emptyMap()
             shownIndex = -1
+            clearShift(lyricText, lyricShift)
+            lyricShift = null
             lyricText.text = getString(R.string.loading_lyrics)
             translationText.visibility = View.GONE
             fetchJob = serviceScope.launch {
@@ -135,6 +143,8 @@ class FloatingLyricService : Service() {
                 }
                 shownIndex = -1
                 if (lines.isEmpty()) {
+                    clearShift(lyricText, lyricShift)
+                    lyricShift = null
                     lyricText.text = getString(R.string.floating_no_lyrics)
                     translationText.visibility = View.GONE
                 } else {
@@ -147,6 +157,7 @@ class FloatingLyricService : Service() {
 
     private fun updateLine(info: PlaybackInfo?) {
         if (info == null || lines.isEmpty()) return
+        applyBarWidth()
         val position = info.positionMs + LyricsPrefs.offsetMs
         var index = 0
         for (i in lines.indices) {
@@ -155,13 +166,50 @@ class FloatingLyricService : Service() {
         if (index == shownIndex) return
         shownIndex = index
         val line = lines[index]
-        lyricText.text = line.text
+        lyricShift = showBarLine(lyricText, line.text, lyricShift)
         val translation = translations[line.timeMs]
         if (translation.isNullOrBlank()) {
+            clearShift(translationText, translationShift)
+            translationShift = null
             translationText.visibility = View.GONE
         } else {
-            translationText.text = translation
+            translationShift = showBarLine(translationText, translation, translationShift)
             translationText.visibility = View.VISIBLE
+        }
+    }
+
+    // If a line is wider than the bar, slide it once (after a short pause so
+    // the head is readable first) so the tail becomes visible instead of "...".
+    private fun showBarLine(view: TextView, text: String, previousShift: Runnable?): Runnable {
+        previousShift?.let { view.removeCallbacks(it) }
+        view.scrollTo(0, 0)
+        view.text = text
+        val shift = Runnable {
+            val overflow = (view.paint.measureText(view.text.toString()) - view.width).toInt()
+            if (overflow > 0) {
+                ObjectAnimator.ofInt(view, "scrollX", 0, overflow).apply {
+                    duration = 700L
+                    start()
+                }
+            }
+        }
+        view.postDelayed(shift, 1500)
+        return shift
+    }
+
+    private fun clearShift(view: TextView, shift: Runnable?) {
+        shift?.let { view.removeCallbacks(it) }
+        view.scrollTo(0, 0)
+    }
+
+    // The bar length is adjustable in Settings; apply a changed width live.
+    private fun applyBarWidth() {
+        val widthPx = (LyricsPrefs.floatingBarWidthDp * resources.displayMetrics.density).toInt()
+        if (lyricText.maxWidth != widthPx) {
+            lyricText.maxWidth = widthPx
+            translationText.maxWidth = widthPx
+            lyricText.requestLayout()
+            translationText.requestLayout()
         }
     }
 
@@ -174,16 +222,18 @@ class FloatingLyricService : Service() {
             setTextColor(0xFFFFFFFF.toInt())
             textSize = 15f
             maxLines = 1
-            ellipsize = TextUtils.TruncateAt.END
-            maxWidth = dp(240)
+            ellipsize = null
+            setHorizontallyScrolling(true)
+            maxWidth = dp(LyricsPrefs.floatingBarWidthDp)
             text = getString(R.string.floating_no_playback)
         }
         translationText = TextView(this).apply {
             setTextColor(0xB3FFFFFF.toInt())
             textSize = 12f
             maxLines = 1
-            ellipsize = TextUtils.TruncateAt.END
-            maxWidth = dp(240)
+            ellipsize = null
+            setHorizontallyScrolling(true)
+            maxWidth = dp(LyricsPrefs.floatingBarWidthDp)
             visibility = View.GONE
         }
         val closeButton = TextView(this).apply {

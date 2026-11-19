@@ -29,11 +29,15 @@ object LyricsPrefs {
     const val OFFSET_MIN_MS = -2000
     const val OFFSET_MAX_MS = 2000
     const val OFFSET_STEP_MS = 100
+    const val FLOATING_BAR_MIN_DP = 160
+    const val FLOATING_BAR_MAX_DP = 360
+    const val FLOATING_BAR_DEFAULT_DP = 240
 
     private const val PREFS_NAME = "lyricsync_prefs"
     private const val KEY_STATUS_CARD = "status_card_visible"
     private const val KEY_SOURCE = "lyric_source"
     private const val KEY_OFFSET = "offset_ms"
+    private const val KEY_FLOATING_BAR_WIDTH = "floating_bar_width_dp"
 
     private lateinit var prefs: SharedPreferences
 
@@ -70,6 +74,22 @@ object LyricsPrefs {
         set(value) {
             if (::prefs.isInitialized) {
                 prefs.edit().putInt(KEY_OFFSET, value.coerceIn(OFFSET_MIN_MS, OFFSET_MAX_MS)).apply()
+            }
+        }
+
+    var floatingBarWidthDp: Int
+        get() = if (::prefs.isInitialized) {
+            prefs.getInt(KEY_FLOATING_BAR_WIDTH, FLOATING_BAR_DEFAULT_DP)
+                .coerceIn(FLOATING_BAR_MIN_DP, FLOATING_BAR_MAX_DP)
+        } else {
+            FLOATING_BAR_DEFAULT_DP
+        }
+        set(value) {
+            if (::prefs.isInitialized) {
+                prefs.edit().putInt(
+                    KEY_FLOATING_BAR_WIDTH,
+                    value.coerceIn(FLOATING_BAR_MIN_DP, FLOATING_BAR_MAX_DP)
+                ).apply()
             }
         }
 }

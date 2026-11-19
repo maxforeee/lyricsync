@@ -289,6 +289,8 @@ fun LyricsScreen(viewModel: LyricsViewModel = viewModel()) {
                 lyricSource = state.lyricSource,
                 onStatusCardChange = viewModel::setStatusCardVisible,
                 onSourceChange = viewModel::setLyricSource,
+                floatingBarWidthDp = state.floatingBarWidthDp,
+                onFloatingBarWidthChange = viewModel::setFloatingBarWidthDp,
                 onAboutClick = { aboutOpen = true },
                 onBack = { settingsOpen = false },
                 modifier = Modifier.fillMaxSize()

@@ -21,6 +21,8 @@
     <string name="settings_source_qq">QQ Music only</string>
     <string name="settings_source_kugou">Kugou only</string>
     <string name="settings_about">About LyricSync</string>
+    <string name="settings_floating_bar_title">Floating bar length</string>
+    <string name="settings_floating_bar_value">%1$d dp</string>
     <string name="search_title">Search lyrics</string>
     <string name="search_field_title">Title</string>
     <string name="search_field_artist">Artist</string>

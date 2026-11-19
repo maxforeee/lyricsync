@@ -38,7 +38,8 @@ data class LyricsUiState(
     val lyricsUnavailable: Boolean = false,
     val liveLyrics: Boolean = false,
     val lyricSource: LyricSource = LyricSource.AUTO,
-    val offsetMs: Int = 0
+    val offsetMs: Int = 0,
+    val floatingBarWidthDp: Int = LyricsPrefs.FLOATING_BAR_DEFAULT_DP
 )
 
 class LyricsViewModel(application: Application) : AndroidViewModel(application) {
@@ -50,7 +51,8 @@ class LyricsViewModel(application: Application) : AndroidViewModel(application) 
         LyricsUiState(
             statusCardVisible = LyricsPrefs.statusCardVisible,
             lyricSource = LyricsPrefs.lyricSource,
-            offsetMs = LyricsPrefs.offsetMs
+            offsetMs = LyricsPrefs.offsetMs,
+            floatingBarWidthDp = LyricsPrefs.floatingBarWidthDp
         )
     )
     val state: StateFlow<LyricsUiState> = _state.asStateFlow()
@@ -188,6 +190,12 @@ class LyricsViewModel(application: Application) : AndroidViewModel(application) 
             val position = (repository.playback.value?.positionMs ?: 0L) + next
             _state.update { it.copy(currentIndex = indexForPosition(it.lines, position)) }
         }
+    }
+
+    fun setFloatingBarWidthDp(dp: Int) {
+        val next = dp.coerceIn(LyricsPrefs.FLOATING_BAR_MIN_DP, LyricsPrefs.FLOATING_BAR_MAX_DP)
+        LyricsPrefs.floatingBarWidthDp = next
+        _state.update { it.copy(floatingBarWidthDp = next) }
     }
 
     fun searchLyrics(title: String, artist: String) {
