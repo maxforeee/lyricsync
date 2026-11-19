@@ -480,7 +480,6 @@ class FloatingLyricService : Service() {
             .setContentTitle(getString(R.string.floating_notification_title))
             .setContentText(getString(R.string.floating_notification_text))
             .setOngoing(true)
-            .setNoClear(true)
             .build()
     }
 
