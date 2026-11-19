@@ -63,14 +63,24 @@ class FloatingLyricService : Service() {
     private lateinit var translationText: TextView
     private lateinit var layoutParams: WindowManager.LayoutParams
     private var barView: LinearLayout? = null
-    // Double-tap the bar to dismiss it (the close button is gone).
+    // Double-tap the bar to dismiss it (the close button is gone). Persist the
+    // intent so a sticky restart after a system kill never resurrects it.
     private val doubleTapDetector by lazy {
         GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
             override fun onDoubleTap(e: MotionEvent): Boolean {
+                setUserDismissed(true)
                 stopSelf()
                 return true
             }
         })
+    }
+
+    private val barPrefs by lazy { getSharedPreferences(BAR_PREFS, Context.MODE_PRIVATE) }
+
+    private fun userDismissed(): Boolean = barPrefs.getBoolean(KEY_USER_DISMISSED, false)
+
+    private fun setUserDismissed(dismissed: Boolean) {
+        barPrefs.edit().putBoolean(KEY_USER_DISMISSED, dismissed).apply()
     }
 
     private var lines: List<LyricLine> = emptyList()
@@ -113,7 +123,9 @@ class FloatingLyricService : Service() {
             buildNotification(),
             ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
         )
-        addBar()
+        // On a sticky restart after a system kill, honour a persisted user
+        // dismissal; an explicit start clears the flag in onStartCommand.
+        if (!userDismissed()) addBar()
         repository = LyricSyncHub.media(this)
         lastPositionChangeMs = SystemClock.elapsedRealtime()
         startWatchdog()
@@ -124,8 +136,23 @@ class FloatingLyricService : Service() {
         }
     }
 
-    // Not sticky: once the user closes the bar it must not restart on its own.
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_NOT_STICKY
+    // Sticky so the system restarts us after a background kill (aggressive OEM
+    // cleanup) and the bar comes back on its own. User intent is kept in a
+    // persisted flag: a dismissed bar stays gone even across a kill/restart.
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent != null) {
+            setUserDismissed(false)
+            if (barView == null) {
+                addBar()
+                shownIndex = -1
+                onPlayback(repository.playback.value)
+            }
+        } else if (userDismissed()) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        return START_STICKY
+    }
 
     override fun onDestroy() {
         if (::lyricText.isInitialized) lyricShift?.let { lyricText.removeCallbacks(it) }
@@ -139,6 +166,9 @@ class FloatingLyricService : Service() {
     }
 
     private fun onPlayback(info: PlaybackInfo?) {
+        // No bar while a dismissal is being processed or before an explicit
+        // start re-adds it; there is nothing to render then.
+        if (barView == null) return
         if (info == null || info.title.isBlank()) {
             // The session can flap null (or blank metadata) for an instant while
             // the same song keeps playing. Clearing here blanked the bar on every
@@ -219,12 +249,32 @@ class FloatingLyricService : Service() {
         watchdogJob = serviceScope.launch {
             while (isActive) {
                 delay(WATCHDOG_INTERVAL_MS)
+                ensureBarAttached()
                 val info = repository.playback.value
                 val lost = info == null || info.title.isBlank()
                 val stale = info != null && info.playing &&
                     SystemClock.elapsedRealtime() - lastPositionChangeMs > POSITION_STALE_MS
                 if (lost || stale) repository.refresh()
             }
+        }
+    }
+
+    // Self-heal the overlay: background cleanup can detach the bar's window
+    // while the service survives. Re-add a fresh bar unless the user dismissed
+    // it, and re-render the current line onto the new views.
+    private fun ensureBarAttached() {
+        if (userDismissed()) return
+        val bar = barView
+        if (bar != null && bar.isAttachedToWindow) return
+        if (bar != null) {
+            runCatching { windowManager.removeViewImmediate(bar) }
+            barView = null
+        }
+        // addView throws if the overlay permission was revoked; retry next tick.
+        runCatching { addBar() }
+        if (barView != null) {
+            shownIndex = -1
+            onPlayback(repository.playback.value)
         }
     }
 
@@ -411,23 +461,34 @@ class FloatingLyricService : Service() {
     }
 
     private fun buildNotification(): Notification {
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        // Channel importance is frozen at creation, so move to a fresh channel
+        // to raise the old LOW one: the user should see the service is running.
+        // Silent DEFAULT gives a status-bar icon without a sound on start.
+        manager.deleteNotificationChannel(LEGACY_CHANNEL_ID)
         val channel = NotificationChannel(
             CHANNEL_ID,
             getString(R.string.floating_notification_title),
-            NotificationManager.IMPORTANCE_LOW
-        )
-        (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
-            .createNotificationChannel(channel)
+            NotificationManager.IMPORTANCE_DEFAULT
+        ).apply {
+            setSound(null, null)
+            enableVibration(false)
+        }
+        manager.createNotificationChannel(channel)
         return Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setContentTitle(getString(R.string.floating_notification_title))
             .setContentText(getString(R.string.floating_notification_text))
             .setOngoing(true)
+            .setNoClear(true)
             .build()
     }
 
     companion object {
-        private const val CHANNEL_ID = "floating_lyrics"
+        private const val CHANNEL_ID = "floating_lyrics_v2"
+        private const val LEGACY_CHANNEL_ID = "floating_lyrics"
+        private const val BAR_PREFS = "floating_bar_state"
+        private const val KEY_USER_DISMISSED = "user_dismissed"
         private const val NOTIFICATION_ID = 2
         private const val NULL_PLAYBACK_GRACE_MS = 2_000L
         private const val WATCHDOG_INTERVAL_MS = 2_000L
