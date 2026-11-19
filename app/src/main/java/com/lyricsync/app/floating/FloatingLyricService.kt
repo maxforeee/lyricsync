@@ -11,6 +11,7 @@ import android.content.pm.ServiceInfo
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.os.IBinder
+import android.view.GestureDetector
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -59,7 +60,15 @@ class FloatingLyricService : Service() {
     private lateinit var translationText: TextView
     private lateinit var layoutParams: WindowManager.LayoutParams
     private var barView: LinearLayout? = null
-    private var closeButtonView: TextView? = null
+    // Double-tap the bar to dismiss it (the close button is gone).
+    private val doubleTapDetector by lazy {
+        GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+            override fun onDoubleTap(e: MotionEvent): Boolean {
+                stopSelf()
+                return true
+            }
+        })
+    }
 
     private var lines: List<LyricLine> = emptyList()
     private var translations: Map<Long, String> = emptyMap()
@@ -180,20 +189,33 @@ class FloatingLyricService : Service() {
 
     // If a line is wider than the bar, slide it once (after a short pause so
     // the head is readable first) so the tail becomes visible instead of "...".
+    // Short lines are centred in the bar instead of leaving a gap on the right.
     private fun showBarLine(view: TextView, text: String, previousShift: Runnable?): Runnable {
         previousShift?.let { view.removeCallbacks(it) }
         view.scrollTo(0, 0)
         view.text = text
+        val visibleWidth = (view.width - view.paddingLeft - view.paddingRight).toFloat()
+        if (view.paint.measureText(text) <= visibleWidth) {
+            view.gravity = Gravity.CENTER
+            return Runnable {}
+        }
+        view.gravity = Gravity.START
         val shift = Runnable {
-            val overflow = (view.paint.measureText(view.text.toString()) - view.width).toInt()
+            // Measure the real laid-out line, not the paint estimate, so the
+            // tail stops exactly at the edge with no empty gap after it.
+            val layoutWidth = view.layout?.getLineWidth(0) ?: view.paint.measureText(view.text.toString())
+            val overflow = (layoutWidth - (view.width - view.paddingLeft - view.paddingRight)).toInt()
             if (overflow > 0) {
                 ObjectAnimator.ofInt(view, "scrollX", 0, overflow).apply {
-                    duration = 700L
+                    duration = 400L
                     start()
                 }
+            } else {
+                // Only looked long because the view had not been laid out yet.
+                view.gravity = Gravity.CENTER
             }
         }
-        view.postDelayed(shift, 1500)
+        view.postDelayed(shift, 700)
         return shift
     }
 
@@ -202,15 +224,21 @@ class FloatingLyricService : Service() {
         view.scrollTo(0, 0)
     }
 
-    // The bar length is adjustable in Settings; apply a changed width live.
+    // The bar length is adjustable in Settings; the bar always shows exactly
+    // the width the user set, it never shrinks or grows with the lyric length.
     private fun applyBarWidth() {
         val widthPx = (LyricsPrefs.floatingBarWidthDp * resources.displayMetrics.density).toInt()
-        if (lyricText.maxWidth != widthPx) {
-            lyricText.maxWidth = widthPx
-            translationText.maxWidth = widthPx
-            lyricText.requestLayout()
-            translationText.requestLayout()
+        fun fixWidth(view: TextView) {
+            val params = view.layoutParams
+            if (params.width != widthPx || view.maxWidth != widthPx) {
+                params.width = widthPx
+                view.layoutParams = params
+                view.maxWidth = widthPx
+                view.requestLayout()
+            }
         }
+        fixWidth(lyricText)
+        fixWidth(translationText)
     }
 
     private fun addBar() {
@@ -224,7 +252,12 @@ class FloatingLyricService : Service() {
             maxLines = 1
             ellipsize = null
             setHorizontallyScrolling(true)
+            layoutParams = LinearLayout.LayoutParams(
+                dp(LyricsPrefs.floatingBarWidthDp),
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
             maxWidth = dp(LyricsPrefs.floatingBarWidthDp)
+            gravity = Gravity.CENTER
             text = getString(R.string.floating_no_playback)
         }
         translationText = TextView(this).apply {
@@ -233,18 +266,14 @@ class FloatingLyricService : Service() {
             maxLines = 1
             ellipsize = null
             setHorizontallyScrolling(true)
+            layoutParams = LinearLayout.LayoutParams(
+                dp(LyricsPrefs.floatingBarWidthDp),
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
             maxWidth = dp(LyricsPrefs.floatingBarWidthDp)
+            gravity = Gravity.CENTER
             visibility = View.GONE
         }
-        val closeButton = TextView(this).apply {
-            text = "✕"
-            setTextColor(0xFFFFFFFF.toInt())
-            textSize = 14f
-            setPadding(dp(10), dp(6), dp(10), dp(6))
-            contentDescription = getString(R.string.floating_close)
-            setOnClickListener { stopSelf() }
-        }
-        closeButtonView = closeButton
         val textColumn = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(lyricText)
@@ -260,16 +289,9 @@ class FloatingLyricService : Service() {
                 cornerRadius = dp(24).toFloat()
                 setStroke(dp(1), 0x33FFFFFF)
             }
-            setPadding(dp(16), dp(10), dp(8), dp(10))
+            setPadding(dp(16), dp(10), dp(16), dp(10))
             addView(
                 textColumn,
-                LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                )
-            )
-            addView(
-                closeButton,
                 LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.WRAP_CONTENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT
@@ -301,11 +323,9 @@ class FloatingLyricService : Service() {
         private var touchY = 0f
 
         override fun onTouch(v: View, event: MotionEvent): Boolean {
+            doubleTapDetector.onTouchEvent(event)
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
-                    // A tap on the close button must reach its click listener;
-                    // returning true here unconditionally used to swallow it.
-                    if (isOnCloseButton(event)) return false
                     startX = layoutParams.x
                     startY = layoutParams.y
                     touchX = event.rawX
@@ -318,16 +338,6 @@ class FloatingLyricService : Service() {
                 }
             }
             return true
-        }
-
-        private fun isOnCloseButton(event: MotionEvent): Boolean {
-            val button = closeButtonView ?: return false
-            val location = IntArray(2)
-            button.getLocationOnScreen(location)
-            val x = event.rawX.toInt()
-            val y = event.rawY.toInt()
-            return x >= location[0] && x < location[0] + button.width &&
-                y >= location[1] && y < location[1] + button.height
         }
     }
 
