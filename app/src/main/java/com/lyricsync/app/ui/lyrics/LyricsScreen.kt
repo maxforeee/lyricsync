@@ -8,11 +8,14 @@ import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.AnimationState
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.animateTo
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
@@ -25,6 +28,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.scroll
 import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -44,6 +48,7 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -526,30 +531,27 @@ private fun LyricsList(
         val anchorOffsetPx = with(density) {
             ((36.sp.toPx() + 16.dp.toPx()) / 2f).roundToInt()
         }
-        var lastAutoScrollTarget by remember { mutableStateOf(-1) }
+        val anchorTopPx = with(density) { (viewportHeight * 0.5f).toPx() }.roundToInt()
+        var lastAutoScrollTarget by remember(lines) { mutableStateOf(-1) }
 
         LaunchedEffect(currentIndex, followEnabled) {
             if (!followEnabled) {
                 lastAutoScrollTarget = -1
                 return@LaunchedEffect
             }
-            if (lastAutoScrollTarget != currentIndex) {
-                lastAutoScrollTarget = currentIndex
-                // animateScrollToItem has no animationSpec parameter in this
-                // Compose version; its built-in animation is already spring-based.
-                listState.animateScrollToItem(
-                    index = currentIndex,
-                    scrollOffset = anchorOffsetPx
-                )
-            }
+            // Only a genuine index change lifts the list; re-emissions of the
+            // same index (playback polling) never restart the animation.
+            if (lastAutoScrollTarget == currentIndex) return@LaunchedEffect
+            lastAutoScrollTarget = currentIndex
+            liftToAnchor(listState, currentIndex, anchorTopPx, anchorOffsetPx)
         }
 
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(
-                top = viewportHeight * 0.35f,
-                bottom = viewportHeight * 0.65f
+                top = viewportHeight * 0.5f,
+                bottom = viewportHeight * 0.5f
             ),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
@@ -561,6 +563,50 @@ private fun LyricsList(
                 )
             }
         }
+    }
+}
+
+/**
+ * Lift the list so [index] rests centred on the 50% anchor using a monotonic
+ * tween. animateScrollToItem is deliberately not used: it aims at a target
+ * computed from the pre-change layout and then snap-corrects at the end,
+ * which reads as a downward dip because the highlighted row's height changes
+ * with the index. Re-reading the remaining distance every frame absorbs that
+ * layout change, and the eased fraction never exceeds the remaining distance,
+ * so the motion never overshoots or settles back down.
+ */
+private suspend fun liftToAnchor(
+    listState: LazyListState,
+    index: Int,
+    anchorTopPx: Int,
+    anchorOffsetPx: Int
+) {
+    val desiredTop = anchorTopPx - anchorOffsetPx
+    val initial = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }
+    if (initial == null) {
+        // Far jump (new song, resume follow after manual scroll): snap, don't fly.
+        listState.scrollToItem(index, anchorOffsetPx)
+        return
+    }
+    if (initial.offset == desiredTop) return
+    listState.scroll {
+        val progress = AnimationState(0f)
+        var previous = 0f
+        progress.animateTo(1f, tween(durationMillis = 300, easing = FastOutSlowInEasing)) {
+            val item = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }
+            if (item == null) {
+                cancelAnimation()
+                return@animateTo
+            }
+            val remaining = (item.offset - desiredTop).toFloat()
+            val fraction = (value - previous) / (1f - previous).coerceAtLeast(0.0001f)
+            previous = value
+            scrollBy(remaining * fraction)
+        }
+    }
+    val settled = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }
+    if (settled == null || settled.offset != desiredTop) {
+        listState.scrollToItem(index, anchorOffsetPx)
     }
 }
 

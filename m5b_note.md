@@ -45,8 +45,38 @@ resolves ocr security finding #18. No source dropped from AUTO; order unchanged.
 Not done here: no on-device verification (no Android SDK on this machine); verification was
 against the live endpoints with curl + Python decode of the exact bytes the app will parse.
 
-## Part 2 (M5 part 3): centre anchor, no-overshoot scroll
-(pending)
+## Part 2 (M5 part 3): centre anchor, no-overshoot scroll — `LyricsScreen.kt`
+
+**Cause found (in code + the exact Compose 1.6.1 sources, BOM 2024.02.00):**
+`animateScrollToItem` in this version (`lazy/layout/LazyAnimateScroll.kt`) computes its
+scroll target from the layout *at animation start* and finishes with a hard
+`snapToItem(index, scrollOffset)` "to account for rounding error". Meanwhile the
+highlighted row's **layout height changes with currentIndex** (28sp/36sp current vs
+18sp/24sp neighbour): when the index advances, the old current row shrinks by ~12sp, so
+the real target ends up ~12sp nearer than the animation aimed for — the list lifts past
+the resting point and the final snap jerks it back **down**. That is the reported
+"上去之后会往下卡一下". (The built-in spring itself is clamped; the dip is the snap-back.)
+
+**Fix:**
+- Anchor: `contentPadding` top = 50% / bottom = 50% of viewport (was 35%/65%). One
+  mechanism: padding defines the centre line; the constant `scrollOffset` (half the
+  current row height) centres the row on it, as before.
+- New `liftToAnchor()`: explicit `AnimationState` + `tween(300ms, FastOutSlowInEasing)`
+  inside `listState.scroll {}`. Each frame it re-reads the target item's live
+  `layoutInfo` offset and scrolls an eased fraction of the *remaining* distance
+  (fraction ≤ 1), so the motion is monotonic — no overshoot, no snap-back dip — and it
+  absorbs the row-height change mid-flight. Lands exactly on the anchor; far jumps
+  (target not visible) snap instead of flying. `animateScrollToItem` is no longer used.
+- Trigger: unchanged guard — `LaunchedEffect(currentIndex, followEnabled)` +
+  `lastAutoScrollTarget` means only a genuine index change scrolls; same-index
+  re-emissions from playback polling never restart it. `lastAutoScrollTarget` now resets
+  when the `lines` list changes. Manual drag still pauses follow (drag cancels the
+  scroll mutex); arc/fade look, menu, floating bar, transparent status bar untouched.
+
+Verified against the real 1.6.1 sources that `AnimationState.animateTo`'s block is
+non-suspend but `ScrollScope.scrollBy` inside `scroll {}` is also non-suspend, so the
+pattern compiles on this exact version (same pattern foundation itself uses).
+Not done: no on-device verification (no Android SDK here).
 
 ## Part 3 (M5 part 4): ocr high/medium fixes
 (pending)
