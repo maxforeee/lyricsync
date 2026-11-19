@@ -59,6 +59,7 @@ class LyricsViewModel(application: Application) : AndroidViewModel(application) 
 
     private var lyricsJob: Job? = null
     private var tickerJob: Job? = null
+    private var nullPlaybackJob: Job? = null
     private var lastResumeRefreshMs = 0L
 
     // Read-modify-write of the fetch/manual-search keys must be atomic: several
@@ -74,14 +75,28 @@ class LyricsViewModel(application: Application) : AndroidViewModel(application) 
     init {
         viewModelScope.launch {
             repository.playback.collect { info ->
-                _state.update { it.copy(playback = info) }
                 if (info == null) {
-                    lyricsJob?.cancel()
-                    fetchKeys.updateAndGet { it.copy(lastLyricsKey = null) }
-                    if (!fetchKeys.get().manualOverride) {
-                        showSampleLyrics()
+                    // The session can flap null for an instant while the same song
+                    // keeps playing (destroy/recreate, empty active-sessions list).
+                    // Resetting the key and swapping to sample lyrics here destroys
+                    // the list scroll state, dropping the current line to the bottom
+                    // on every flap. Only treat null as a real loss after a grace.
+                    if (nullPlaybackJob?.isActive != true) {
+                        nullPlaybackJob = viewModelScope.launch {
+                            delay(NULL_PLAYBACK_GRACE_MS)
+                            if (repository.playback.value != null) return@launch
+                            _state.update { it.copy(playback = null) }
+                            lyricsJob?.cancel()
+                            fetchKeys.updateAndGet { it.copy(lastLyricsKey = null) }
+                            if (!fetchKeys.get().manualOverride) {
+                                showSampleLyrics()
+                            }
+                        }
                     }
                 } else {
+                    nullPlaybackJob?.cancel()
+                    nullPlaybackJob = null
+                    _state.update { it.copy(playback = info) }
                     val key = playbackKey(info)
                     val keys = fetchKeys.get()
                     if (keys.manualOverride && key != keys.manualPlayingKey) {
@@ -278,19 +293,31 @@ class LyricsViewModel(application: Application) : AndroidViewModel(application) 
         lyricsJob?.cancel()
         stopSampleTicker()
         lyricsJob = viewModelScope.launch {
-            _state.update {
-                it.copy(
-                    lines = emptyList(),
-                    currentIndex = 0,
-                    lyricsLoading = true,
-                    lyricsUnavailable = false,
-                    liveLyrics = false
-                )
+            // Re-fetching the song already on screen (refresh, source change, key
+            // reset) must keep the visible lines: blanking them swaps to the spinner,
+            // which drops LyricsList from composition and resets its scroll, dumping
+            // the current line at the bottom. Only a first fetch shows the spinner.
+            val sameSongRefetch = previous.lastLyricsKey == null &&
+                _state.value.liveLyrics &&
+                _state.value.lines.isNotEmpty()
+            if (!sameSongRefetch) {
+                _state.update {
+                    it.copy(
+                        lines = emptyList(),
+                        currentIndex = 0,
+                        lyricsLoading = true,
+                        lyricsUnavailable = false,
+                        liveLyrics = false
+                    )
+                }
             }
             try {
                 val result = fetchOrError(info.title, info.artist)
                 ensureActive()
                 if (fetchKeys.get().lastLyricsKey != key) return@launch
+                val usable = result is LyricsResult.Found && result.lines.isNotEmpty()
+                // A failed re-fetch must not blank lyrics that are still playing.
+                if (sameSongRefetch && !usable) return@launch
                 publishResult(result, liveIfFound = true)
             } finally {
                 resetLoadingIfCurrent()
@@ -388,6 +415,7 @@ class LyricsViewModel(application: Application) : AndroidViewModel(application) 
     companion object {
         private const val TAG = "LyricsViewModel"
         private const val RESUME_REFRESH_THROTTLE_MS = 2_000L
+        private const val NULL_PLAYBACK_GRACE_MS = 2_000L
         private val WHITESPACE = Regex("\\s+")
     }
 }
