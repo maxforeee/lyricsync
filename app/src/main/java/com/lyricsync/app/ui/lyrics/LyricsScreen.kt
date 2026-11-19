@@ -528,7 +528,10 @@ private fun LyricsList(
         val anchorTopPx = with(density) { (viewportHeight * 0.5f).toPx() }.roundToInt()
         var lastAutoScrollTarget by remember(lines) { mutableStateOf(-1) }
 
-        LaunchedEffect(currentIndex, followEnabled) {
+        // Re-run on lines changes too: remember(lines) resets the guard when a
+        // re-fetch replaces the lines, and without a key change the effect
+        // would never re-lift the row for the unchanged index.
+        LaunchedEffect(currentIndex, followEnabled, lines) {
             if (!followEnabled) {
                 lastAutoScrollTarget = -1
                 return@LaunchedEffect
@@ -592,7 +595,6 @@ private suspend fun liftToAnchor(
     anchorTopPx: Int,
     anchorOffsetPx: Int
 ): Boolean {
-    val desiredTop = anchorTopPx - anchorOffsetPx
     // Far jump (new song, resume follow after manual scroll): walk the list
     // toward the target in relative steps until the row is visible, then
     // glide the rest of the way like a normal line change.
@@ -605,6 +607,13 @@ private suspend fun liftToAnchor(
         listState.scroll { scrollBy(if (index > firstVisible) step else -step) }
     }
     val initial = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index } ?: return false
+    // item.offset is measured from the end of the top content padding, not
+    // from the container top (viewportStartOffset = -beforeContentPadding):
+    // the on-screen top is item.offset - viewportStartOffset. Express the
+    // anchor in item coordinates, otherwise the glide aims one padding below
+    // the anchor and, at scroll 0, asks for a backward scroll that is clamped
+    // to zero - the list never moves and the line sinks toward the bottom.
+    val desiredTop = anchorTopPx - anchorOffsetPx + listState.layoutInfo.viewportStartOffset
     if (initial.offset == desiredTop) return true
     listState.scroll {
         val progress = AnimationState(0f)
