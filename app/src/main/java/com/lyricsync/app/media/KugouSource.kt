@@ -39,7 +39,9 @@ object KugouSource {
         return try {
             val query = URLEncoder.encode("$title $artist".trim(), "UTF-8")
             val searchBody = httpGet(
-                "http://mobilecdn.kugou.com/api/v3/search/song?format=json&keyword=$query&page=1&pagesize=1&showtype=1",
+                // mobilecdn.kugou.com serves a mismatched TLS cert; mobiles.kugou.com
+                // is the HTTPS-valid mirror with the same response shape.
+                "https://mobiles.kugou.com/api/v3/search/song?format=json&keyword=$query&page=1&pagesize=1&showtype=1",
                 HEADERS
             ) ?: return LyricsResult.NotFound
             val info = JSONObject(searchBody)
@@ -51,7 +53,7 @@ object KugouSource {
 
             val keyword = URLEncoder.encode(title, "UTF-8")
             val candidatesBody = httpGet(
-                "http://lyrics.kugou.com/search?ver=1&man=yes&client=pc&keyword=$keyword&hash=$hash&timelength=$durationMs",
+                "https://lyrics.kugou.com/search?ver=1&man=yes&client=pc&keyword=$keyword&hash=$hash&timelength=$durationMs",
                 HEADERS
             ) ?: return LyricsResult.NotFound
             val candidate = JSONObject(candidatesBody).optJSONArray("candidates")?.optJSONObject(0)
@@ -61,7 +63,7 @@ object KugouSource {
             if (id.isBlank() || accessKey.isBlank()) return LyricsResult.NotFound
 
             val downloadBody = httpGet(
-                "http://lyrics.kugou.com/download?ver=1&client=pc&id=$id&accesskey=$accessKey&fmt=krc&charset=utf8",
+                "https://lyrics.kugou.com/download?ver=1&client=pc&id=$id&accesskey=$accessKey&fmt=krc&charset=utf8",
                 HEADERS
             ) ?: return LyricsResult.NotFound
             val downloadJson = JSONObject(downloadBody)

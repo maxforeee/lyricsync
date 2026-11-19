@@ -39,18 +39,27 @@ object QqMusicSource {
     fun fetch(title: String, artist: String): LyricsResult {
         return try {
             val query = URLEncoder.encode("$title $artist".trim(), "UTF-8")
+            // The legacy full param set (new_json=1 etc.) now returns totalnum=0;
+            // minimal params return the old shape: data.song.list[] with songmid.
             val searchBody = httpGet(
-                "https://c.y.qq.com/soso/fcgi-bin/client_search_cp?ct=24&qqmusic_ver=1298&new_json=1" +
-                    "&remoteplace=txt.yqq.song&t=0&aggr=1&cr=1&catZhida=1&lossless=0&flag_qc=0" +
-                    "&p=1&n=1&g_tk=5381&loginUin=0&hostUin=0&format=json&inCharset=utf8" +
-                    "&outCharset=utf-8&notice=0&platform=yqq.json&needNewCode=0&w=$query",
+                "https://c.y.qq.com/soso/fcgi-bin/client_search_cp?w=$query&format=json&n=5&p=1",
                 HEADERS
             ) ?: return LyricsResult.NotFound
-            val song = JSONObject(searchBody)
-                .optJSONObject("data")?.optJSONArray("song")?.optJSONObject(0)
-                ?: return LyricsResult.NotFound
-            val mid = song.optString("mid").ifBlank { song.optString("songmid") }
-            if (mid.isBlank()) return LyricsResult.NotFound
+            val list = JSONObject(searchBody)
+                .optJSONObject("data")?.optJSONObject("song")?.optJSONArray("list")
+            if (list == null || list.length() == 0) return LyricsResult.NotFound
+            val wantedTitle = title.trim()
+            val wantedArtist = artist.trim()
+            val candidates = (0 until list.length())
+                .mapNotNull { list.optJSONObject(it) }
+                .filter { it.optString("songmid").ifBlank { it.optString("mid") }.isNotBlank() }
+            if (candidates.isEmpty()) return LyricsResult.NotFound
+            val song = candidates.firstOrNull {
+                songTitle(it).equals(wantedTitle, ignoreCase = true) && singerMatches(it, wantedArtist)
+            } ?: candidates.firstOrNull {
+                songTitle(it).equals(wantedTitle, ignoreCase = true)
+            } ?: candidates.first()
+            val mid = song.optString("songmid").ifBlank { song.optString("mid") }
 
             val lyricBody = httpGet(
                 "https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid=$mid&format=json",
@@ -72,6 +81,23 @@ object QqMusicSource {
             Log.w(TAG, "QQ Music decode failed", e)
             LyricsResult.NotFound
         }
+    }
+
+    private fun songTitle(song: JSONObject): String =
+        song.optString("songname").ifBlank { song.optString("name") }.trim()
+
+    private fun singerMatches(song: JSONObject, artist: String): Boolean {
+        if (artist.isBlank()) return true
+        val singers = song.optJSONArray("singer") ?: return false
+        for (i in 0 until singers.length()) {
+            val name = singers.optJSONObject(i)?.optString("name")?.trim() ?: continue
+            if (name.isBlank()) continue
+            if (name.equals(artist, ignoreCase = true) ||
+                name.contains(artist, ignoreCase = true) ||
+                artist.contains(name, ignoreCase = true)
+            ) return true
+        }
+        return false
     }
 
     /** Recover UTF-8 LRC text from Base64-decoded QRC bytes, or null on failure. */
