@@ -78,6 +78,20 @@ class FloatingLyricService : Service() {
     private var lastPlayback: PlaybackInfo? = null
     private var lyricShift: Runnable? = null
     private var translationShift: Runnable? = null
+    // The slide animator is not reachable through the view's callback queue:
+    // once it has started, removeCallbacks cannot stop it, so track it per
+    // view and cancel it whenever the line is reset. Otherwise a stale
+    // animator keeps writing scrollX and slides the NEW line out of the clip,
+    // leaving an empty near-black pill ("black lyrics").
+    private var lyricSlide: ObjectAnimator? = null
+    private var translationSlide: ObjectAnimator? = null
+
+    private fun slideFor(view: TextView): ObjectAnimator? =
+        if (view === lyricText) lyricSlide else translationSlide
+
+    private fun setSlideFor(view: TextView, animator: ObjectAnimator?) {
+        if (view === lyricText) lyricSlide = animator else translationSlide = animator
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -105,6 +119,8 @@ class FloatingLyricService : Service() {
     override fun onDestroy() {
         if (::lyricText.isInitialized) lyricShift?.let { lyricText.removeCallbacks(it) }
         if (::translationText.isInitialized) translationShift?.let { translationText.removeCallbacks(it) }
+        lyricSlide?.cancel()
+        translationSlide?.cancel()
         serviceScope.cancel()
         barView?.let { windowManager.removeView(it) }
         barView = null
@@ -192,6 +208,8 @@ class FloatingLyricService : Service() {
     // Short lines are centred in the bar instead of leaving a gap on the right.
     private fun showBarLine(view: TextView, text: String, previousShift: Runnable?): Runnable {
         previousShift?.let { view.removeCallbacks(it) }
+        slideFor(view)?.cancel()
+        setSlideFor(view, null)
         view.scrollTo(0, 0)
         view.text = text
         val visibleWidth = (view.width - view.paddingLeft - view.paddingRight).toFloat()
@@ -208,6 +226,7 @@ class FloatingLyricService : Service() {
             if (overflow > 0) {
                 ObjectAnimator.ofInt(view, "scrollX", 0, overflow).apply {
                     duration = 400L
+                    setSlideFor(view, this)
                     start()
                 }
             } else {
@@ -221,6 +240,8 @@ class FloatingLyricService : Service() {
 
     private fun clearShift(view: TextView, shift: Runnable?) {
         shift?.let { view.removeCallbacks(it) }
+        slideFor(view)?.cancel()
+        setSlideFor(view, null)
         view.scrollTo(0, 0)
     }
 
