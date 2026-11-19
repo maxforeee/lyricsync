@@ -555,7 +555,9 @@ private fun LyricsList(
             ),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            itemsIndexed(lines, key = { _, line -> line.timeMs }) { index, line ->
+            // Composite key: LRC keeps original + translation lines sharing a
+            // timestamp, so timeMs alone can collide and crash LazyColumn.
+            itemsIndexed(lines, key = { _, line -> line.timeMs to line.text }) { index, line ->
                 LyricRow(
                     text = line.text,
                     distance = abs(index - currentIndex),
@@ -792,8 +794,11 @@ private fun formatClock(ms: Long): String {
     return String.format(Locale.US, "%02d:%02d", totalSeconds / 60L, totalSeconds % 60L)
 }
 
+// Only used from composition (main thread), so sharing one instance is safe.
+private val TIME_OF_DAY_FORMAT = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+
 private fun formatTimeOfDay(epochMs: Long): String =
-    SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(epochMs))
+    TIME_OF_DAY_FORMAT.format(Date(epochMs))
 
 @Composable
 private fun rememberAnimatedBackgroundColors(): Pair<Color, Color> {

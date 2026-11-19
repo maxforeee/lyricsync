@@ -1,6 +1,8 @@
 package com.lyricsync.app.ui.lyrics
 
 import android.app.Application
+import android.os.SystemClock
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.lyricsync.app.floating.LyricSyncHub
@@ -10,6 +12,7 @@ import com.lyricsync.app.media.LyricsResult
 import com.lyricsync.app.media.PlaybackInfo
 import com.lyricsync.app.model.LyricLine
 import com.lyricsync.app.model.SampleLyrics
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -19,6 +22,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.coroutines.coroutineContext
 
 data class LyricsUiState(
     val lines: List<LyricLine> = SampleLyrics.lines,
@@ -51,9 +56,18 @@ class LyricsViewModel(application: Application) : AndroidViewModel(application) 
     val state: StateFlow<LyricsUiState> = _state.asStateFlow()
 
     private var lyricsJob: Job? = null
-    private var lastLyricsKey: String? = null
-    private var manualOverride = false
-    private var manualPlayingKey: String? = null
+    private var tickerJob: Job? = null
+    private var lastResumeRefreshMs = 0L
+
+    // Read-modify-write of the fetch/manual-search keys must be atomic: several
+    // coroutines (playback collector, search, refresh) touch them.
+    private data class FetchKeys(
+        val manualOverride: Boolean = false,
+        val manualPlayingKey: String? = null,
+        val lastLyricsKey: String? = null
+    )
+
+    private val fetchKeys = AtomicReference(FetchKeys())
 
     init {
         viewModelScope.launch {
@@ -61,24 +75,23 @@ class LyricsViewModel(application: Application) : AndroidViewModel(application) 
                 _state.update { it.copy(playback = info) }
                 if (info == null) {
                     lyricsJob?.cancel()
-                    lastLyricsKey = null
-                    if (!manualOverride) {
+                    fetchKeys.updateAndGet { it.copy(lastLyricsKey = null) }
+                    if (!fetchKeys.get().manualOverride) {
                         showSampleLyrics()
                     }
                 } else {
                     val key = playbackKey(info)
-                    if (manualOverride && key != manualPlayingKey) {
-                        manualOverride = false
-                        manualPlayingKey = null
-                        lastLyricsKey = null
+                    val keys = fetchKeys.get()
+                    if (keys.manualOverride && key != keys.manualPlayingKey) {
+                        fetchKeys.set(FetchKeys())
                     }
-                    if (!manualOverride && info.title.isNotBlank()) {
+                    if (!fetchKeys.get().manualOverride && info.title.isNotBlank()) {
                         fetchLyricsFor(info)
                     }
                     if (_state.value.liveLyrics) {
                         val index = indexForPosition(
                             _state.value.lines,
-                            info.positionMs + LyricsPrefs.offsetMs
+                            info.positionMs + _state.value.offsetMs
                         )
                         _state.update { it.copy(currentIndex = index) }
                     }
@@ -91,7 +104,14 @@ class LyricsViewModel(application: Application) : AndroidViewModel(application) 
             }
         }
         repository.refresh()
-        viewModelScope.launch {
+        startSampleTicker()
+    }
+
+    // The sample-lyrics ticker only runs while sample lyrics are shown; it is
+    // cancelled as soon as a real fetch starts instead of looping while paused.
+    private fun startSampleTicker() {
+        if (tickerJob?.isActive == true) return
+        tickerJob = viewModelScope.launch {
             while (isActive) {
                 val snapshot = _state.value
                 if (snapshot.lines.isEmpty()) {
@@ -114,6 +134,11 @@ class LyricsViewModel(application: Application) : AndroidViewModel(application) 
                 }
             }
         }
+    }
+
+    private fun stopSampleTicker() {
+        tickerJob?.cancel()
+        tickerJob = null
     }
 
     fun onUserScroll() {
@@ -145,9 +170,7 @@ class LyricsViewModel(application: Application) : AndroidViewModel(application) 
         if (source == _state.value.lyricSource) return
         LyricsPrefs.lyricSource = source
         _state.update { it.copy(lyricSource = source) }
-        manualOverride = false
-        manualPlayingKey = null
-        lastLyricsKey = null
+        fetchKeys.set(FetchKeys())
         val info = repository.playback.value
         if (info != null && info.title.isNotBlank()) {
             fetchLyricsFor(info)
@@ -172,10 +195,16 @@ class LyricsViewModel(application: Application) : AndroidViewModel(application) 
         val cleanArtist = artist.trim()
         if (cleanTitle.isEmpty()) return
         val playing = repository.playback.value
-        manualOverride = true
-        manualPlayingKey = playing?.let { playbackKey(it) }
-        lastLyricsKey = "$cleanTitle|$cleanArtist"
+        val searchKey = trackKey(cleanTitle, cleanArtist)
+        fetchKeys.updateAndGet {
+            it.copy(
+                manualOverride = true,
+                manualPlayingKey = playing?.let { p -> playbackKey(p) },
+                lastLyricsKey = searchKey
+            )
+        }
         lyricsJob?.cancel()
+        stopSampleTicker()
         lyricsJob = viewModelScope.launch {
             _state.update {
                 it.copy(
@@ -186,70 +215,60 @@ class LyricsViewModel(application: Application) : AndroidViewModel(application) 
                     liveLyrics = false
                 )
             }
-            val result = lyricsRepository.fetchLyrics(cleanTitle, cleanArtist)
-            ensureActive()
-            when (result) {
-                is LyricsResult.Found -> {
-                    val matchesPlaying = manualPlayingKey != null &&
-                        manualPlayingKey == "$cleanTitle|$cleanArtist"
-                    val position = (repository.playback.value?.positionMs ?: 0L) + LyricsPrefs.offsetMs
-                    _state.update {
-                        it.copy(
-                            lines = result.lines,
-                            currentIndex = if (matchesPlaying) {
-                                indexForPosition(result.lines, position)
-                            } else {
-                                0
-                            },
-                            lyricsLoading = false,
-                            lyricsUnavailable = false,
-                            liveLyrics = matchesPlaying
-                        )
-                    }
-                }
-                LyricsResult.NotFound, LyricsResult.Error -> {
-                    _state.update {
-                        it.copy(
-                            lines = emptyList(),
-                            currentIndex = 0,
-                            lyricsLoading = false,
-                            lyricsUnavailable = true,
-                            liveLyrics = false
-                        )
-                    }
-                }
+            try {
+                val result = fetchOrError(cleanTitle, cleanArtist)
+                ensureActive()
+                // Both keys use the same normalisation, so a manual search for
+                // the playing track really does match and sync live.
+                val keys = fetchKeys.get()
+                val matchesPlaying = keys.manualPlayingKey != null &&
+                    keys.manualPlayingKey == searchKey
+                publishResult(result, liveIfFound = matchesPlaying)
+            } finally {
+                resetLoadingIfCurrent()
             }
         }
     }
 
     fun onScreenResume() {
+        // Resume fires after every dialog/overlay too; throttle so repeated
+        // resumes cannot pile up session refreshes and fetch races.
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastResumeRefreshMs < RESUME_REFRESH_THROTTLE_MS) return
+        lastResumeRefreshMs = now
         repository.refresh()
     }
 
     fun refresh() {
         if (_state.value.refreshing) return
+        _state.update { it.copy(refreshing = true) }
         viewModelScope.launch {
-            _state.update { it.copy(refreshing = true) }
-            delay(600L)
-            manualOverride = false
-            manualPlayingKey = null
-            lastLyricsKey = null
-            repository.refresh()
-            val info = repository.playback.value
-            if (info != null && info.title.isNotBlank()) {
-                fetchLyricsFor(info)
-            } else {
-                showSampleLyrics()
+            try {
+                delay(600L)
+                fetchKeys.set(FetchKeys())
+                repository.refresh()
+                val info = repository.playback.value
+                if (info != null && info.title.isNotBlank()) {
+                    fetchLyricsFor(info)
+                } else {
+                    showSampleLyrics()
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "Refresh failed", e)
+            } finally {
+                _state.update { it.copy(refreshing = false) }
             }
-            _state.update { it.copy(refreshing = false) }
         }
     }
 
     private fun fetchLyricsFor(info: PlaybackInfo) {
         val key = playbackKey(info)
-        if (key == lastLyricsKey) return
-        lastLyricsKey = key
+        val previous = fetchKeys.getAndUpdate { it.copy(lastLyricsKey = key) }
+        if (key == previous.lastLyricsKey) return
         lyricsJob?.cancel()
+        stopSampleTicker()
         lyricsJob = viewModelScope.launch {
             _state.update {
                 it.copy(
@@ -260,34 +279,72 @@ class LyricsViewModel(application: Application) : AndroidViewModel(application) 
                     liveLyrics = false
                 )
             }
-            val result = lyricsRepository.fetchLyrics(info.title, info.artist)
-            ensureActive()
-            if (lastLyricsKey != key) return@launch
-            when (result) {
-                is LyricsResult.Found -> {
-                    val position = (repository.playback.value?.positionMs ?: 0L) + LyricsPrefs.offsetMs
-                    _state.update {
-                        it.copy(
-                            lines = result.lines,
-                            currentIndex = indexForPosition(result.lines, position),
-                            lyricsLoading = false,
-                            lyricsUnavailable = false,
-                            liveLyrics = true
-                        )
-                    }
-                }
-                LyricsResult.NotFound, LyricsResult.Error -> {
-                    _state.update {
-                        it.copy(
-                            lines = emptyList(),
-                            currentIndex = 0,
-                            lyricsLoading = false,
-                            lyricsUnavailable = true,
-                            liveLyrics = false
-                        )
-                    }
+            try {
+                val result = fetchOrError(info.title, info.artist)
+                ensureActive()
+                if (fetchKeys.get().lastLyricsKey != key) return@launch
+                publishResult(result, liveIfFound = true)
+            } finally {
+                resetLoadingIfCurrent()
+            }
+        }
+    }
+
+    private suspend fun fetchOrError(title: String, artist: String): LyricsResult {
+        return try {
+            lyricsRepository.fetchLyrics(title, artist)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Lyrics fetch failed", e)
+            LyricsResult.Error
+        }
+    }
+
+    private fun publishResult(result: LyricsResult, liveIfFound: Boolean) {
+        // A Found result with no lines is not usable lyrics.
+        val outcome = if (result is LyricsResult.Found && result.lines.isEmpty()) {
+            LyricsResult.NotFound
+        } else {
+            result
+        }
+        when (outcome) {
+            is LyricsResult.Found -> {
+                val position = (repository.playback.value?.positionMs ?: 0L) + _state.value.offsetMs
+                _state.update {
+                    it.copy(
+                        lines = outcome.lines,
+                        currentIndex = if (liveIfFound) {
+                            indexForPosition(outcome.lines, position)
+                        } else {
+                            0
+                        },
+                        lyricsLoading = false,
+                        lyricsUnavailable = false,
+                        liveLyrics = liveIfFound
+                    )
                 }
             }
+            LyricsResult.NotFound, LyricsResult.Error -> {
+                _state.update {
+                    it.copy(
+                        lines = emptyList(),
+                        currentIndex = 0,
+                        lyricsLoading = false,
+                        lyricsUnavailable = true,
+                        liveLyrics = false
+                    )
+                }
+            }
+        }
+    }
+
+    // A cancelled fetch must not leave the spinner on, but it also must not
+    // clear the spinner of the newer job that replaced it.
+    private suspend fun resetLoadingIfCurrent() {
+        val job = coroutineContext[Job]
+        _state.update {
+            if (it.lyricsLoading && lyricsJob === job) it.copy(lyricsLoading = false) else it
         }
     }
 
@@ -301,10 +358,16 @@ class LyricsViewModel(application: Application) : AndroidViewModel(application) 
                 liveLyrics = false
             )
         }
+        startSampleTicker()
     }
 
-    private fun playbackKey(info: PlaybackInfo): String =
-        info.title.trim() + "|" + info.artist.trim()
+    private fun playbackKey(info: PlaybackInfo): String = trackKey(info.title, info.artist)
+
+    private fun trackKey(title: String, artist: String): String =
+        normalizeKeyPart(title) + "|" + normalizeKeyPart(artist)
+
+    private fun normalizeKeyPart(value: String): String =
+        value.trim().replace(WHITESPACE, " ").lowercase()
 
     private fun indexForPosition(lines: List<LyricLine>, positionMs: Long): Int {
         var index = 0
@@ -312,5 +375,11 @@ class LyricsViewModel(application: Application) : AndroidViewModel(application) 
             if (lines[i].timeMs <= positionMs) index = i else break
         }
         return index
+    }
+
+    companion object {
+        private const val TAG = "LyricsViewModel"
+        private const val RESUME_REFRESH_THROTTLE_MS = 2_000L
+        private val WHITESPACE = Regex("\\s+")
     }
 }

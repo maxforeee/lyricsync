@@ -59,6 +59,7 @@ class FloatingLyricService : Service() {
     private lateinit var translationText: TextView
     private lateinit var layoutParams: WindowManager.LayoutParams
     private var barView: LinearLayout? = null
+    private var closeButtonView: TextView? = null
 
     private var lines: List<LyricLine> = emptyList()
     private var translations: Map<Long, String> = emptyMap()
@@ -87,7 +88,8 @@ class FloatingLyricService : Service() {
         }
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+    // Not sticky: once the user closes the bar it must not restart on its own.
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_NOT_STICKY
 
     override fun onDestroy() {
         serviceScope.cancel()
@@ -192,6 +194,7 @@ class FloatingLyricService : Service() {
             contentDescription = getString(R.string.floating_close)
             setOnClickListener { stopSelf() }
         }
+        closeButtonView = closeButton
         val textColumn = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(lyricText)
@@ -250,6 +253,9 @@ class FloatingLyricService : Service() {
         override fun onTouch(v: View, event: MotionEvent): Boolean {
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
+                    // A tap on the close button must reach its click listener;
+                    // returning true here unconditionally used to swallow it.
+                    if (isOnCloseButton(event)) return false
                     startX = layoutParams.x
                     startY = layoutParams.y
                     touchX = event.rawX
@@ -262,6 +268,16 @@ class FloatingLyricService : Service() {
                 }
             }
             return true
+        }
+
+        private fun isOnCloseButton(event: MotionEvent): Boolean {
+            val button = closeButtonView ?: return false
+            val location = IntArray(2)
+            button.getLocationOnScreen(location)
+            val x = event.rawX.toInt()
+            val y = event.rawY.toInt()
+            return x >= location[0] && x < location[0] + button.width &&
+                y >= location[1] && y < location[1] + button.height
         }
     }
 

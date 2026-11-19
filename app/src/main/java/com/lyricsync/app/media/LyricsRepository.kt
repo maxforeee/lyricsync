@@ -12,7 +12,7 @@ import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
-import java.util.concurrent.ConcurrentHashMap
+import java.util.LinkedHashMap
 
 sealed class LyricsResult {
     data class Found(
@@ -43,41 +43,55 @@ object LyricsPrefs {
         }
     }
 
+    // Access before init() falls back to defaults instead of throwing
+    // UninitializedPropertyAccessException.
     var statusCardVisible: Boolean
-        get() = prefs.getBoolean(KEY_STATUS_CARD, true)
+        get() = if (::prefs.isInitialized) prefs.getBoolean(KEY_STATUS_CARD, true) else true
         set(value) {
-            prefs.edit().putBoolean(KEY_STATUS_CARD, value).apply()
+            if (::prefs.isInitialized) prefs.edit().putBoolean(KEY_STATUS_CARD, value).apply()
         }
 
     var lyricSource: LyricSource
         get() {
+            if (!::prefs.isInitialized) return LyricSource.AUTO
             val name = prefs.getString(KEY_SOURCE, null) ?: return LyricSource.AUTO
             return runCatching { LyricSource.valueOf(name) }.getOrDefault(LyricSource.AUTO)
         }
         set(value) {
-            prefs.edit().putString(KEY_SOURCE, value.name).apply()
+            if (::prefs.isInitialized) prefs.edit().putString(KEY_SOURCE, value.name).apply()
         }
 
     var offsetMs: Int
-        get() = prefs.getInt(KEY_OFFSET, 0).coerceIn(OFFSET_MIN_MS, OFFSET_MAX_MS)
+        get() = if (::prefs.isInitialized) {
+            prefs.getInt(KEY_OFFSET, 0).coerceIn(OFFSET_MIN_MS, OFFSET_MAX_MS)
+        } else {
+            0
+        }
         set(value) {
-            prefs.edit().putInt(KEY_OFFSET, value.coerceIn(OFFSET_MIN_MS, OFFSET_MAX_MS)).apply()
+            if (::prefs.isInitialized) {
+                prefs.edit().putInt(KEY_OFFSET, value.coerceIn(OFFSET_MIN_MS, OFFSET_MAX_MS)).apply()
+            }
         }
 }
 
 class LyricsRepository {
 
-    private val cache = ConcurrentHashMap<String, LyricsResult>()
+    // Access-ordered LRU so repeated lookups of a bounded song set never grow
+    // the cache without limit. All access is synchronized on the map.
+    private val cache = object : LinkedHashMap<String, LyricsResult>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, LyricsResult>): Boolean =
+            size > MAX_CACHE_ENTRIES
+    }
 
     suspend fun fetchLyrics(title: String, artist: String): LyricsResult {
         val cleanTitle = title.trim()
         val cleanArtist = artist.trim()
         val source = LyricsPrefs.lyricSource
         val key = "$cleanTitle|$cleanArtist|$source"
-        cache[key]?.let { return it }
+        synchronized(cache) { cache[key] }?.let { return it }
         val result = withContext(Dispatchers.IO) { fetchUncached(cleanTitle, cleanArtist, source) }
         if (result !is LyricsResult.Error) {
-            cache[key] = result
+            synchronized(cache) { cache[key] = result }
         }
         return result
     }
@@ -130,7 +144,9 @@ class LyricsRepository {
         } catch (e: IOException) {
             LyricsResult.Error
         } catch (e: JSONException) {
-            LyricsResult.NotFound
+            // Malformed response = source malfunction, not "song has no lyrics";
+            // Error keeps it out of the cache and lets AUTO report accurately.
+            LyricsResult.Error
         }
     }
 
@@ -156,7 +172,7 @@ class LyricsRepository {
             if (lines.isEmpty()) return LyricsResult.NotFound
             val tlyricJson = json.optJSONObject("tlyric")
             val tlyric = if (tlyricJson == null || tlyricJson.isNull("lyric")) null else tlyricJson.optString("lyric")
-            val translations = if (tlyric.isNullOrBlank()) {
+            val translations = if (tlyric.isNullOrBlank() || tlyric.trim() == "无") {
                 emptyMap()
             } else {
                 LrcParser.parse(tlyric).associate { it.timeMs to it.text }
@@ -165,13 +181,14 @@ class LyricsRepository {
         } catch (e: IOException) {
             LyricsResult.Error
         } catch (e: JSONException) {
-            LyricsResult.NotFound
+            LyricsResult.Error
         }
     }
 
     private fun httpGet(url: String, headers: Map<String, String>): String? {
-        val connection = URL(url).openConnection() as HttpURLConnection
-        return try {
+        var connection: HttpURLConnection? = null
+        try {
+            connection = URL(url).openConnection() as? HttpURLConnection ?: return null
             connection.connectTimeout = TIMEOUT_MS
             connection.readTimeout = TIMEOUT_MS
             connection.requestMethod = "GET"
@@ -179,15 +196,16 @@ class LyricsRepository {
                 connection.setRequestProperty(name, value)
             }
             if (connection.responseCode != HttpURLConnection.HTTP_OK) return null
-            connection.inputStream.bufferedReader().use { it.readText() }
+            return connection.inputStream.bufferedReader().use { it.readText() }
         } finally {
-            connection.disconnect()
+            connection?.disconnect()
         }
     }
 
     companion object {
         private const val TAG = "LyricsRepository"
         private const val TIMEOUT_MS = 8_000
+        private const val MAX_CACHE_ENTRIES = 32
         private val NETEASE_HEADERS = mapOf(
             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Referer" to "https://music.163.com"

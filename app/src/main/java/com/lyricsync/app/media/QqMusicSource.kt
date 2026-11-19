@@ -31,6 +31,13 @@ object QqMusicSource {
     private const val QRC_KEY = "!@#)(*$%123ZXC!@#)(*$%123ZXC!@#)(*$%"
     private val ZERO_IV = ByteArray(8)
 
+    private val LRC_STAMP = Regex("""\[\d{1,3}:\d{1,2}""")
+    private val QRC_WORD_TAG = Regex("""<[^>]*>""")
+    private val QRC_WORD_STAMP = Regex("""\(\d+,\d+\)""")
+
+    // Zip-bomb guard: lyric payloads are a few KB at most.
+    private const val MAX_INFLATED_BYTES = 2 * 1024 * 1024
+
     private val HEADERS = mapOf(
         "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Referer" to "https://y.qq.com/"
@@ -66,11 +73,11 @@ object QqMusicSource {
                 HEADERS + ("Referer" to "https://y.qq.com/portal/player.html")
             ) ?: return LyricsResult.NotFound
             val lyricJson = JSONObject(lyricBody)
-            val encoded = if (lyricJson.isNull("lyric")) null else lyricJson.optString("lyric")
-            if (encoded.isNullOrBlank()) return LyricsResult.NotFound
+            val encoded = lyricJson.optString("lyric")
+            if (encoded.isBlank()) return LyricsResult.NotFound
 
             val decoded = Base64.decode(encoded, Base64.DEFAULT)
-            val lrc = decodeQrc(decoded) ?: return LyricsResult.NotFound
+            val lrc = decodeQrc(unwrapLyricPayload(decoded)) ?: return LyricsResult.Error
             val lines = LrcParser.parse(stripQrcTags(lrc))
             if (lines.isEmpty()) return LyricsResult.NotFound
             LyricsResult.Found(lines)
@@ -78,8 +85,29 @@ object QqMusicSource {
             Log.w(TAG, "QQ Music request failed", e)
             LyricsResult.Error
         } catch (e: Exception) {
+            // Decode/parse failure is a source malfunction, not "no lyrics exist";
+            // Error keeps it out of the cache and lets AUTO report accurately.
             Log.w(TAG, "QQ Music decode failed", e)
-            LyricsResult.NotFound
+            LyricsResult.Error
+        }
+    }
+
+    /**
+     * The endpoint sometimes base64-wraps a JSON metadata object instead of raw
+     * lyric bytes; unwrap it and pull out the inner "lyric" field.
+     */
+    private fun unwrapLyricPayload(data: ByteArray): ByteArray {
+        val text = String(data, Charsets.UTF_8)
+        if (!text.trimStart().startsWith("{")) return data
+        return try {
+            val inner = JSONObject(text).optString("lyric")
+            when {
+                inner.isBlank() -> data
+                looksLikeLrc(inner.toByteArray(Charsets.UTF_8)) -> inner.toByteArray(Charsets.UTF_8)
+                else -> Base64.decode(inner, Base64.DEFAULT)
+            }
+        } catch (e: Exception) {
+            data
         }
     }
 
@@ -136,10 +164,11 @@ object QqMusicSource {
             val output = java.io.ByteArrayOutputStream()
             while (!inflater.finished()) {
                 val count = inflater.inflate(buffer)
-                if (count == 0) {
-                    if (inflater.needsInput() || inflater.needsDictionary()) break
-                }
+                // Zero count means needsInput/needsDictionary or a stalled
+                // stream; stop instead of spinning forever.
+                if (count == 0) break
                 output.write(buffer, 0, count)
+                if (output.size() > MAX_INFLATED_BYTES) return data
             }
             output.toByteArray()
         } catch (e: DataFormatException) {
@@ -151,27 +180,28 @@ object QqMusicSource {
 
     private fun looksLikeLrc(data: ByteArray): Boolean {
         val text = String(data, Charsets.UTF_8)
-        return Regex("""\[\d{1,3}:\d{1,2}""").containsMatchIn(text)
+        return LRC_STAMP.containsMatchIn(text)
     }
 
     /** Drop QRC-only word-timing / markup, keeping standard [mm:ss.xx] lines. */
     private fun stripQrcTags(lrc: String): String {
         return lrc
-            .replace(Regex("""<[^>]*>"""), "")
-            .replace(Regex("""\(\d+,\d+\)"""), "")
+            .replace(QRC_WORD_TAG, "")
+            .replace(QRC_WORD_STAMP, "")
     }
 
     private fun httpGet(url: String, headers: Map<String, String>): String? {
-        val connection = URL(url).openConnection() as HttpURLConnection
-        return try {
+        var connection: HttpURLConnection? = null
+        try {
+            connection = URL(url).openConnection() as? HttpURLConnection ?: return null
             connection.connectTimeout = TIMEOUT_MS
             connection.readTimeout = TIMEOUT_MS
             connection.requestMethod = "GET"
             for ((name, value) in headers) connection.setRequestProperty(name, value)
             if (connection.responseCode != HttpURLConnection.HTTP_OK) return null
-            connection.inputStream.bufferedReader().use { it.readText() }
+            return connection.inputStream.bufferedReader().use { it.readText() }
         } finally {
-            connection.disconnect()
+            connection?.disconnect()
         }
     }
 

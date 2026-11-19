@@ -29,6 +29,7 @@ class MediaSessionRepository(
     private var controller: MediaController? = null
     private var pollJob: Job? = null
     private var lastPolledPosition = -1L
+    private var sessionsListener: MediaSessionManager.OnActiveSessionsChangedListener? = null
 
     private val callback = object : MediaController.Callback() {
         override fun onMetadataChanged(metadata: MediaMetadata?) {
@@ -54,16 +55,43 @@ class MediaSessionRepository(
             return
         }
         val manager = context.getSystemService(Context.MEDIA_SESSION_SERVICE) as MediaSessionManager
+        val component = ComponentName(context, LyricNotificationListener::class.java)
         val sessions = try {
-            manager.getActiveSessions(ComponentName(context, LyricNotificationListener::class.java))
+            manager.getActiveSessions(component)
         } catch (e: SecurityException) {
             _listenerGranted.value = false
             detach()
             _playback.value = null
             return
         }
+        // Re-discover sessions when a media app starts (or stops) later, not
+        // only at refresh time.
+        if (sessionsListener == null) {
+            val listener = MediaSessionManager.OnActiveSessionsChangedListener { active ->
+                attachBest(active ?: emptyList())
+            }
+            try {
+                manager.addOnActiveSessionsChangedListener(listener, component)
+                sessionsListener = listener
+            } catch (e: SecurityException) {
+                _listenerGranted.value = false
+                detach()
+                _playback.value = null
+                return
+            }
+        }
+        attachBest(sessions)
+    }
+
+    private fun attachBest(sessions: List<MediaController>) {
         val next = sessions.firstOrNull { it.packageName == TELEGRAM_PACKAGE }
             ?: sessions.firstOrNull()
+        // getActiveSessions returns fresh controller instances; compare session
+        // tokens so an unchanged session is not detached and reattached.
+        if (next?.sessionToken == controller?.sessionToken) {
+            if (next != null) publish()
+            return
+        }
         detach()
         if (next == null) {
             _playback.value = null
@@ -77,6 +105,15 @@ class MediaSessionRepository(
 
     fun close() {
         detach()
+        sessionsListener?.let { listener ->
+            val manager = context.getSystemService(Context.MEDIA_SESSION_SERVICE) as MediaSessionManager
+            try {
+                manager.removeOnActiveSessionsChangedListener(listener)
+            } catch (e: SecurityException) {
+                // Notification access already revoked; nothing to unregister.
+            }
+        }
+        sessionsListener = null
     }
 
     private fun isListenerGranted(): Boolean {
@@ -101,15 +138,17 @@ class MediaSessionRepository(
         val metadata = current.metadata
         val state = current.playbackState
         val previous = _playback.value
+        val playing = state?.state == PlaybackState.STATE_PLAYING
         _playback.value = PlaybackInfo(
             packageName = current.packageName,
             title = metadata?.getString(MediaMetadata.METADATA_KEY_TITLE).orEmpty(),
             artist = metadata?.getString(MediaMetadata.METADATA_KEY_ARTIST).orEmpty(),
             durationMs = metadata?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L,
-            positionMs = positionMs ?: state?.position ?: 0L,
-            playing = state?.state == PlaybackState.STATE_PLAYING,
+            // PLAYBACK_POSITION_UNKNOWN is -1; never publish a negative position.
+            positionMs = (positionMs ?: state?.position ?: 0L).coerceAtLeast(0L),
+            playing = playing,
             lastUpdateMs = System.currentTimeMillis(),
-            positionAdvancing = advancing ?: previous?.positionAdvancing ?: false
+            positionAdvancing = advancing ?: (playing && previous?.positionAdvancing == true)
         )
     }
 
@@ -119,9 +158,16 @@ class MediaSessionRepository(
             while (isActive) {
                 delay(POLL_INTERVAL_MS)
                 val current = controller ?: continue
-                val state = current.playbackState ?: continue
-                if (state.state != PlaybackState.STATE_PLAYING) continue
-                val position = state.position
+                val state = current.playbackState
+                if (state == null || state.state != PlaybackState.STATE_PLAYING) {
+                    // Publish paused/stopped states too: skipping them left
+                    // positionAdvancing sticky-true after playback stopped.
+                    val position = (state?.position ?: 0L).coerceAtLeast(0L)
+                    lastPolledPosition = position
+                    publish(positionMs = position, advancing = false)
+                    continue
+                }
+                val position = state.position.coerceAtLeast(0L)
                 val advancing = lastPolledPosition >= 0L && position > lastPolledPosition
                 lastPolledPosition = position
                 publish(positionMs = position, advancing = advancing)

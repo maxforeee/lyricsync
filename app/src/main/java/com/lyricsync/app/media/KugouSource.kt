@@ -31,6 +31,14 @@ object KugouSource {
         0x51, 0x36, 0x31, 0x2d, 0xce.toByte(), 0xd2.toByte(), 0x6e, 0x69
     )
 
+    private val KRC_MAGIC = "krc1".toByteArray(Charsets.US_ASCII)
+
+    private val KRC_WORD_TAG = Regex("""<\d+,\d+,\d+>""")
+    private val KRC_LINE_STAMP = Regex("""^\[(\d+),\d+]""")
+
+    // Zip-bomb guard: lyric payloads are a few KB at most.
+    private const val MAX_INFLATED_BYTES = 2 * 1024 * 1024
+
     private val HEADERS = mapOf(
         "User-Agent" to "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
     )
@@ -67,11 +75,11 @@ object KugouSource {
                 HEADERS
             ) ?: return LyricsResult.NotFound
             val downloadJson = JSONObject(downloadBody)
-            val content = if (downloadJson.isNull("content")) null else downloadJson.optString("content")
-            if (content.isNullOrBlank()) return LyricsResult.NotFound
+            val content = downloadJson.optString("content")
+            if (content.isBlank()) return LyricsResult.NotFound
 
             val krc = Base64.decode(content, Base64.DEFAULT)
-            val lrc = decodeKrc(krc) ?: return LyricsResult.NotFound
+            val lrc = decodeKrc(krc) ?: return LyricsResult.Error
             val lines = LrcParser.parse(normalizeKrc(lrc))
             if (lines.isEmpty()) return LyricsResult.NotFound
             LyricsResult.Found(lines)
@@ -79,14 +87,19 @@ object KugouSource {
             Log.w(TAG, "Kugou request failed", e)
             LyricsResult.Error
         } catch (e: Exception) {
+            // Decode/parse failure is a source malfunction, not "no lyrics exist";
+            // Error keeps it out of the cache and lets AUTO report accurately.
             Log.w(TAG, "Kugou decode failed", e)
-            LyricsResult.NotFound
+            LyricsResult.Error
         }
     }
 
     /** Strip the "krc1" header, XOR with the cycling key, then zlib-inflate. */
     private fun decodeKrc(data: ByteArray): String? {
-        if (data.size <= 4) return null
+        if (data.size <= 4 || !data.copyOfRange(0, 4).contentEquals(KRC_MAGIC)) {
+            Log.w(TAG, "KRC magic mismatch, not a krc1 payload")
+            return null
+        }
         val decrypted = ByteArray(data.size - 4)
         for (i in decrypted.indices) {
             decrypted[i] = (data[i + 4].toInt() xor KRC_KEY[i % KRC_KEY.size].toInt()).toByte()
@@ -98,8 +111,14 @@ object KugouSource {
             val output = ByteArrayOutputStream()
             while (!inflater.finished()) {
                 val count = inflater.inflate(buffer)
-                if (count == 0 && (inflater.needsInput() || inflater.needsDictionary())) break
+                // Zero count means needsInput/needsDictionary or a stalled
+                // stream; stop instead of spinning forever.
+                if (count == 0) break
                 output.write(buffer, 0, count)
+                if (output.size() > MAX_INFLATED_BYTES) {
+                    Log.w(TAG, "KRC inflated output exceeds cap, aborting")
+                    return null
+                }
             }
             String(output.toByteArray(), Charsets.UTF_8)
         } catch (e: DataFormatException) {
@@ -115,11 +134,9 @@ object KugouSource {
      * word tags; rewrite them to standard [mm:ss.xx] LRC for LrcParser.
      */
     private fun normalizeKrc(text: String): String {
-        val wordTag = Regex("""<\d+,\d+,\d+>""")
-        val lineStamp = Regex("""^\[(\d+),\d+]""")
         return text.lineSequence().joinToString("\n") { rawLine ->
-            val line = wordTag.replace(rawLine, "")
-            val match = lineStamp.find(line) ?: return@joinToString line
+            val line = KRC_WORD_TAG.replace(rawLine, "")
+            val match = KRC_LINE_STAMP.find(line) ?: return@joinToString line
             val ms = match.groupValues[1].toLongOrNull() ?: return@joinToString line
             val minutes = ms / 60_000L
             val seconds = (ms % 60_000L) / 1_000L
@@ -129,16 +146,17 @@ object KugouSource {
     }
 
     private fun httpGet(url: String, headers: Map<String, String>): String? {
-        val connection = URL(url).openConnection() as HttpURLConnection
-        return try {
+        var connection: HttpURLConnection? = null
+        try {
+            connection = URL(url).openConnection() as? HttpURLConnection ?: return null
             connection.connectTimeout = TIMEOUT_MS
             connection.readTimeout = TIMEOUT_MS
             connection.requestMethod = "GET"
             for ((name, value) in headers) connection.setRequestProperty(name, value)
             if (connection.responseCode != HttpURLConnection.HTTP_OK) return null
-            connection.inputStream.bufferedReader().use { it.readText() }
+            return connection.inputStream.bufferedReader().use { it.readText() }
         } finally {
-            connection.disconnect()
+            connection?.disconnect()
         }
     }
 

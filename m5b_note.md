@@ -79,4 +79,105 @@ pattern compiles on this exact version (same pattern foundation itself uses).
 Not done: no on-device verification (no Android SDK here).
 
 ## Part 3 (M5 part 4): ocr high/medium fixes
-(pending)
+
+### HIGH — all fixed
+1. **LyricsPrefs lateinit** (`LyricsRepository.kt`): every getter/setter now guards with
+   `::prefs.isInitialized`; pre-init reads return defaults (true / AUTO / 0), writes no-op.
+2. **fetchLyrics unguarded** (`LyricsViewModel.kt`): new `fetchOrError()` wraps the fetch in
+   try-catch, rethrows `CancellationException`, maps anything else to `Error`. Used by both
+   `searchLyrics` and `fetchLyricsFor`.
+3. **matchesPlaying vacuous**: both sides now use one normalisation —
+   `trackKey(title, artist)` = trim + collapse whitespace + lowercase per part;
+   `playbackKey(info)` delegates to it, and the manual-search key is built with the same
+   function, so searching the playing track (any casing/spacing) matches and syncs live.
+
+### MEDIUM (bug) — all fixed
+4. **NotFound vs Error**: QQ/Kugou generic decode/parse catch and null-decode now return
+   `Error`; lrclib/NetEase `JSONException` now returns `Error` (was NotFound, which got
+   cached as "no lyrics exist"). AUTO already continues on both; Error is not cached and
+   surfaces accurately. Genuine empty-result paths stay NotFound.
+5. **QQ base64-JSON metadata**: new `unwrapLyricPayload()` detects decoded bytes starting
+   with `{`, parses the JSON and extracts the inner `lyric` (plain LRC or base64).
+6. **openConnection outside try**: all three `httpGet`s (repository, QQ, Kugou) create the
+   connection inside try via `as? HttpURLConnection`, disconnect in finally.
+7. **Unbounded cache**: replaced ConcurrentHashMap with a synchronized access-ordered
+   `LinkedHashMap` LRU capped at 32 entries.
+8. **Non-atomic key fields**: `manualOverride`/`manualPlayingKey`/`lastLyricsKey` moved into
+   an immutable `FetchKeys` held in an `AtomicReference`; all read-modify-writes use
+   `updateAndGet`/`getAndUpdate`/`set`.
+9. **ensureActive leaves spinner on**: both fetch jobs wrap the body in try/finally with
+   `resetLoadingIfCurrent()`, which clears `lyricsLoading` only if the finishing job is
+   still the current `lyricsJob` (never clears a newer job's spinner).
+10. **Found with empty lines**: `publishResult()` demotes empty-line Found to NotFound
+    (unavailable UI) before publishing.
+11. **refresh() fire-and-forget**: flag set synchronously before launch; body in
+    try/catch (rethrow cancellation) with `refreshing = false` in finally.
+12. **offsetMs divergence**: index math (playback collector, publishResult) reads
+    `_state.value.offsetMs`; prefs only used for persistence/init.
+13. **Ticker never stops**: sample ticker is now a `tickerJob` started by
+    `showSampleLyrics()`/init and cancelled whenever a real fetch starts
+    (`fetchLyricsFor`, `searchLyrics`) — no wakeups during live playback/pause.
+14. **Deprecated bar colors** (`MainActivity.kt`): `statusBarColor`/`navigationBarColor`
+    setters gated behind `Build.VERSION.SDK_INT < 35` (literal 35; compileSdk is 34).
+    Transparent look preserved: pre-35 via setters, 35+ via enforced edge-to-edge.
+15. **MediaSessionRepository**: registers `OnActiveSessionsChangedListener` so sessions
+    starting later are re-discovered (grant-time re-discovery via the existing
+    onScreenResume refresh); `attachBest` compares session tokens so refresh is idempotent
+    (no detach/reattach churn). Poll loop now publishes paused/stopped states with
+    `advancing = false` instead of `continue` (no more sticky-true); `publish()` default
+    advancing requires `playing`; all positions clamped `>= 0` (never
+    PLAYBACK_POSITION_UNKNOWN). Listener removed in `close()`.
+16. **FloatingLyricService**: drag listener returns false for ACTION_DOWN landing on the
+    close button (bounds check via `getLocationOnScreen`), so its click listener receives
+    the tap; drags elsewhere unchanged. `START_STICKY` → `START_NOT_STICKY`.
+17. **ON_RESUME refresh**: `onScreenResume()` throttled to once per 2s
+    (`SystemClock.elapsedRealtime`); combined with idempotent `attachBest` and the
+    key-guarded fetch, repeated resumes cannot pile up fetches/races.
+
+### MEDIUM (security) — all fixed
+18. **Kugou plain HTTP**: all endpoints HTTPS (done in Part 1; `mobiles.kugou.com` mirror
+    because `mobilecdn`'s TLS cert is invalid). Verified live.
+19. **Inflate zip-bomb / spin**: Kugou `decodeKrc` and QQ `maybeInflate` now break on any
+    zero-count inflate (no-progress) and abort past a 2 MiB output cap.
+    KRC `krc1` magic validated before stripping the header (task-listed with security).
+
+### LOW — fixed (trivial)
+- KRC magic check (also required by the task, see above).
+- Regexes hoisted to private vals in QQ (`LRC_STAMP`, `QRC_WORD_TAG`, `QRC_WORD_STAMP`)
+  and Kugou (`KRC_WORD_TAG`, `KRC_LINE_STAMP`).
+- NetEase tlyric placeholder `"无"` filtered before merging translations.
+- LazyColumn key now composite `timeMs to text` (duplicate timestamps from kept
+  translation lines no longer crash).
+- `formatTimeOfDay` shares one hoisted `SimpleDateFormat` (main-thread-only usage).
+- QQ redundant `isNull` + `optString` simplified (same trivial pattern in Kugou content).
+
+### LOW — skipped (not one-line / not applicable)
+- **SampleLyrics release guard**: it is the production default/fallback state in
+  LyricsViewModel; moving to a debug source set breaks release compilation and
+  @VisibleForTesting would be inaccurate. Needs a product decision, not a one-liner.
+- **MainActivity DeepIndigo duplication**: already references the single shared
+  `DeepIndigo` constant from ui/theme (same constant the theme uses); no duplicated
+  literal exists to remove.
+
+### SKIP list from ocr-findings.md (style/docs, per task instruction)
+- PlaybackInfo.kt KDoc — documentation only.
+- LyricNotificationListener onListenerConnected suggestion — listed as skip in the
+  findings; re-discovery is covered by the sessions-changed listener + resume refresh.
+- LyricLine ordering contract — documentation only.
+- LyricsScreen per-row animation allocations / background brush rebuild / palette-cycle
+  jump / cameraDistance magic numbers / BackHandler click-through — stylistic/perf polish,
+  explicitly out of scope for this batch (and the arc/fade look must not change).
+- DotMenu sizing, SettingsScreen/Theme polish — styling, out of scope.
+- LyricsRepository concurrent-dedup + duplicate IOException/JSONException boilerplate —
+  refactor/dedup, not a correctness bug; chain semantics intentionally unchanged.
+- QqMusic TIMEOUT_MS placement — stylistic.
+
+### Already committed in M5 part 1 (not redone)
+LrcParser fraction >3 digits, whitespace-tolerant tags, translation lines kept.
+
+### Not done / verification limits
+No gradle build/test and no on-device run (no Android SDK on this machine, per task).
+Compile-sensitive spots were checked against the exact dependency sources
+(foundation/animation-core 1.6.1 from Google Maven): `AnimationState.animateTo` block is
+non-suspend but `ScrollScope.scrollBy` inside `scroll {}` is non-suspend too, and the
+class+factory single-name import pattern matches existing `Animatable` usage in this file.
