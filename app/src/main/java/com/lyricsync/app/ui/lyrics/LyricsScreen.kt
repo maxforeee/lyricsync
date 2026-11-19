@@ -7,12 +7,15 @@ import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -530,13 +533,16 @@ private fun LyricsList(
                 lastAutoScrollTarget = -1
                 return@LaunchedEffect
             }
-            val visibleItems = listState.layoutInfo.visibleItemsInfo
-            val currentVisible = visibleItems.any { it.index == currentIndex }
-            val nearBottomEdge = visibleItems.lastOrNull()
-                ?.let { currentIndex >= it.index - 2 } ?: false
-            if ((!currentVisible || nearBottomEdge) && lastAutoScrollTarget != currentIndex) {
+            if (lastAutoScrollTarget != currentIndex) {
                 lastAutoScrollTarget = currentIndex
-                listState.animateScrollToItem(currentIndex, anchorOffsetPx)
+                listState.animateScrollToItem(
+                    index = currentIndex,
+                    scrollOffset = anchorOffsetPx,
+                    animationSpec = spring(
+                        stiffness = Spring.StiffnessLow,
+                        dampingRatio = Spring.DampingRatioMediumBouncy
+                    )
+                )
             }
         }
 
@@ -649,15 +655,23 @@ private fun LyricRow(text: String, distance: Int, isAboveCurrent: Boolean) {
         animationSpec = tween(250),
         label = "arcTilt"
     )
+    val isCurrent = distance == 0
+    val currentEmphasis = remember { Animatable(1f) }
+    LaunchedEffect(isCurrent) {
+        if (isCurrent) {
+            currentEmphasis.snapTo(0.9f)
+            currentEmphasis.animateTo(1f, tween(300))
+        }
+    }
     Text(
         text = text,
         style = style,
         modifier = Modifier
             .fillMaxWidth()
             .graphicsLayer {
-                scaleX = arcScale
-                scaleY = arcScale
-                alpha = arcAlpha
+                scaleX = arcScale * currentEmphasis.value
+                scaleY = arcScale * currentEmphasis.value
+                alpha = arcAlpha * currentEmphasis.value
                 rotationX = arcTilt
                 cameraDistance = 12f * density
             }
