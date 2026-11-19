@@ -22,8 +22,6 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.BorderStroke
@@ -243,14 +241,8 @@ fun LyricsScreen(viewModel: LyricsViewModel = viewModel()) {
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .padding(end = 24.dp, bottom = 92.dp),
-                enter = slideInVertically(
-                    animationSpec = tween(220),
-                    initialOffsetY = { it }
-                ) + fadeIn(animationSpec = tween(220)),
-                exit = slideOutVertically(
-                    animationSpec = tween(180),
-                    targetOffsetY = { it }
-                ) + fadeOut(animationSpec = tween(180))
+                enter = fadeIn(animationSpec = tween(220)),
+                exit = fadeOut(animationSpec = tween(180))
             ) {
                 DotMenuPill(
                     onItemClick = { itemRes ->
