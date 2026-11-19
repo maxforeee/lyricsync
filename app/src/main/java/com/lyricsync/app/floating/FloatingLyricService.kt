@@ -11,6 +11,7 @@ import android.content.pm.ServiceInfo
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.os.IBinder
+import android.os.SystemClock
 import android.view.GestureDetector
 import android.view.Gravity
 import android.view.MotionEvent
@@ -31,7 +32,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 object LyricSyncHub {
@@ -76,6 +79,11 @@ class FloatingLyricService : Service() {
     private var shownIndex = -1
     private var fetchJob: Job? = null
     private var lastPlayback: PlaybackInfo? = null
+    private lateinit var repository: MediaSessionRepository
+    private var nullPlaybackJob: Job? = null
+    private var watchdogJob: Job? = null
+    private var lastPositionMs = -1L
+    private var lastPositionChangeMs = 0L
     private var lyricShift: Runnable? = null
     private var translationShift: Runnable? = null
     // The slide animator is not reachable through the view's callback queue:
@@ -106,8 +114,11 @@ class FloatingLyricService : Service() {
             ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
         )
         addBar()
+        repository = LyricSyncHub.media(this)
+        lastPositionChangeMs = SystemClock.elapsedRealtime()
+        startWatchdog()
         serviceScope.launch {
-            LyricSyncHub.media(this@FloatingLyricService).playback.collect { info ->
+            repository.playback.collect { info ->
                 onPlayback(info)
             }
         }
@@ -128,18 +139,36 @@ class FloatingLyricService : Service() {
     }
 
     private fun onPlayback(info: PlaybackInfo?) {
-        lastPlayback = info
         if (info == null || info.title.isBlank()) {
-            fetchJob?.cancel()
-            lines = emptyList()
-            translations = emptyMap()
-            lyricsKey = null
-            shownIndex = -1
-            clearShift(lyricText, lyricShift)
-            lyricShift = null
-            lyricText.text = getString(R.string.floating_no_playback)
-            translationText.visibility = View.GONE
+            // The session can flap null (or blank metadata) for an instant while
+            // the same song keeps playing. Clearing here blanked the bar on every
+            // flap, including interludes; only treat it as a real loss after the
+            // same grace the ViewModel uses, keeping the last line on screen.
+            if (nullPlaybackJob?.isActive != true) {
+                nullPlaybackJob = serviceScope.launch {
+                    delay(NULL_PLAYBACK_GRACE_MS)
+                    val current = repository.playback.value
+                    if (current != null && current.title.isNotBlank()) return@launch
+                    lastPlayback = null
+                    fetchJob?.cancel()
+                    lines = emptyList()
+                    translations = emptyMap()
+                    lyricsKey = null
+                    shownIndex = -1
+                    clearShift(lyricText, lyricShift)
+                    lyricShift = null
+                    lyricText.text = getString(R.string.floating_no_playback)
+                    translationText.visibility = View.GONE
+                }
+            }
             return
+        }
+        nullPlaybackJob?.cancel()
+        nullPlaybackJob = null
+        lastPlayback = info
+        if (info.positionMs != lastPositionMs) {
+            lastPositionMs = info.positionMs
+            lastPositionChangeMs = SystemClock.elapsedRealtime()
         }
         val key = info.title.trim() + "|" + info.artist.trim()
         if (key != lyricsKey) {
@@ -178,6 +207,25 @@ class FloatingLyricService : Service() {
             }
         }
         updateLine(info)
+    }
+
+    // In background nothing else calls repository.refresh(): the ViewModel only
+    // refreshes on init/resume. If the session is lost (or its position freezes
+    // while "playing") and the active-sessions callback never re-attaches, the
+    // bar would stay blank until the user returns to the app. Re-discover the
+    // session ourselves; refresh is a no-op re-publish when nothing changed.
+    private fun startWatchdog() {
+        if (watchdogJob?.isActive == true) return
+        watchdogJob = serviceScope.launch {
+            while (isActive) {
+                delay(WATCHDOG_INTERVAL_MS)
+                val info = repository.playback.value
+                val lost = info == null || info.title.isBlank()
+                val stale = info != null && info.playing &&
+                    SystemClock.elapsedRealtime() - lastPositionChangeMs > POSITION_STALE_MS
+                if (lost || stale) repository.refresh()
+            }
+        }
     }
 
     private fun updateLine(info: PlaybackInfo?) {
@@ -381,5 +429,8 @@ class FloatingLyricService : Service() {
     companion object {
         private const val CHANNEL_ID = "floating_lyrics"
         private const val NOTIFICATION_ID = 2
+        private const val NULL_PLAYBACK_GRACE_MS = 2_000L
+        private const val WATCHDOG_INTERVAL_MS = 2_000L
+        private const val POSITION_STALE_MS = 5_000L
     }
 }

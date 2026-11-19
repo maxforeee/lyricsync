@@ -84,8 +84,11 @@ class MediaSessionRepository(
     }
 
     private fun attachBest(sessions: List<MediaController>) {
-        val next = sessions.firstOrNull { it.packageName == TELEGRAM_PACKAGE }
-            ?: sessions.firstOrNull()
+        // Telegram ships package variants (org.telegram.messenger.web); exact
+        // equality missed them and fell back to whatever session was first.
+        val next = sessions.firstOrNull {
+            it.packageName == TELEGRAM_PACKAGE || it.packageName.startsWith("$TELEGRAM_PACKAGE.")
+        } ?: sessions.firstOrNull()
         // getActiveSessions returns fresh controller instances; compare session
         // tokens so an unchanged session is not detached and reattached.
         if (next?.sessionToken == controller?.sessionToken) {
